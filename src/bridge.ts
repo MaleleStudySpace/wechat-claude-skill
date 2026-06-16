@@ -94,6 +94,13 @@ async function main() {
 
   // Create Express app
   const app = express();
+  // Force UTF-8 encoding for all requests
+  app.use((req, _res, next) => {
+    if (!req.headers['content-type']?.includes('charset')) {
+      req.headers['content-type'] = `${req.headers['content-type'] || 'application/json'}; charset=utf-8`;
+    }
+    next();
+  });
   app.use(express.json({ limit: '10mb' }));
 
   // Health check
