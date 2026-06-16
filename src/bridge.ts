@@ -153,7 +153,9 @@ async function main() {
   const poller = startMessagePolling(
     config,
     (messages: WeChatMessage[]) => {
+      log(`Received ${messages.length} messages from polling`);
       for (const msg of messages) {
+        log(`  msg: isSystem=${msg.isSystem} isBot=${msg.isBot} text=${msg.text?.slice(0, 50)}`);
         if (msg.isSystem || msg.isBot) continue;
 
         const enqueued = queue.enqueue({

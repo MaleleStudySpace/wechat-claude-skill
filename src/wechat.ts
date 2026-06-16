@@ -15,7 +15,7 @@
  * - Abortable sleep
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { BridgeConfig } from './config.js';
@@ -136,14 +136,14 @@ function loadSyncBuf(): any {
 function saveSyncBuf(buf: any): void {
   try {
     mkdirSync(SYNC_BUF_DIR, { recursive: true });
-    writeFileSync(SYNC_BUF_PATH, JSON.stringify(buf), 'utf-8');
+    writeFileSync(SYNC_BUF_PATH, JSON.stringify({ get_updates_buf: buf }), 'utf-8');
   } catch {}
 }
 
 // --- Message parsing ---
 
 function parseMessage(raw: any): WeChatMessage | null {
-  const msgType = raw?.msg_type;
+  const msgType = raw?.msg_type ?? raw?.message_type;
   if (msgType === undefined || msgType === null) return null;
 
   const msgId =
@@ -236,6 +236,8 @@ async function makeFetchInit(
     'Authorization': `Bearer ${config.botToken}`,
     'AuthorizationType': 'ilink_bot_token',
     'X-WECHAT-UIN': generateUin(), // Fresh UIN per request
+    'iLink-App-Id': 'bot',
+    'iLink-App-ClientVersion': '131584', // (2<<16)|(2<<8)|0
     ...extraHeaders,
   };
   const init: RequestInit = { method, headers };
@@ -253,7 +255,9 @@ async function apiPost(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const init = await makeFetchInit('POST', config, extraHeaders, payload);
+    // Add base_info like hermes-agent does
+    const fullPayload = { ...payload, base_info: { channel_version: '2.2.0' } };
+    const init = await makeFetchInit('POST', config, extraHeaders, fullPayload);
     (init as any).signal = controller.signal;
     const resp = await fetch(`${config.baseUrl}/${endpoint}`, init);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
@@ -371,7 +375,8 @@ export async function fetchMessages(
       return { messages: [], newSyncKey: syncKey, sessionExpired: true } as any;
     }
 
-    if (json.ret !== 0) {
+    // ret=undefined or ret=0 both mean success
+    if (json.ret !== undefined && json.ret !== 0) {
       return { messages: [], newSyncKey: syncKey };
     }
 
@@ -383,10 +388,11 @@ export async function fetchMessages(
     const extractedUserId = tryExtractMyUserId(json);
     if (extractedUserId) myUserIdRef.current = extractedUserId;
 
-    // Persist sync buffer
-    if (json.get_updates_buf) saveSyncBuf(json.get_updates_buf);
+    // Update sync buffer
+    const newSyncBuf = json.get_updates_buf || syncBuf;
+    if (newSyncBuf) saveSyncBuf(newSyncBuf);
 
-    return { messages, newSyncKey: syncKey };
+    return { messages, newSyncKey: newSyncBuf };
   } catch {
     return { messages: [], newSyncKey: syncKey };
   }
@@ -410,11 +416,20 @@ export function startMessagePolling(
   const recentMsgIds = new Set<string>();
   let consecutiveFailures = 0;
 
+  // Debug logging to file (console.log is lost when bridge runs detached)
+  const LOG_FILE = join(homedir(), '.wechat-claude-skill', 'bridge.log');
+  const debugLog = (msg: string) => {
+    try { appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`); } catch {}
+  };
+
   (async () => {
     while (running) {
       try {
+        debugLog('[POLL] Polling...');
         const result = await fetchMessages(config, syncKey, contextTokenMap, myUserIdRef);
-        const { messages } = result as any;
+        const { messages, newSyncKey } = result as any;
+        if (newSyncKey) syncKey = newSyncKey;
+        debugLog(`[POLL] Got ${messages?.length || 0} messages, syncKey=${typeof syncKey === 'string' ? syncKey.slice(0, 20) : 'object'}`);
 
         // Session expired: pause for 1 hour
         if ((result as any).sessionExpired) {
