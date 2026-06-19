@@ -9,7 +9,7 @@
  */
 
 import * as pty from 'node-pty';
-import { writeFileSync, existsSync, mkdirSync, appendFileSync, createWriteStream, createReadStream } from 'node:fs';
+import { writeFileSync, existsSync, mkdirSync, appendFileSync, createWriteStream, createReadStream, unlinkSync } from 'node:fs';
 import type { WriteStream, ReadStream } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -150,10 +150,7 @@ export class PTYServer {
       this.ptyProcess = null;
     }
     // Clean up PID file
-    try {
-      const { unlinkSync } = require('node:fs');
-      unlinkSync(PTY_PID_FILE);
-    } catch {}
+    try { unlinkSync(PTY_PID_FILE); } catch {}
   }
 
   private bufferOutput(data: string): void {

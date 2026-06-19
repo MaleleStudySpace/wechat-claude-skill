@@ -1,12 +1,11 @@
 /**
  * Setup script for wechat-claude-skill.
  *
- * Usage:
- *   npx wechat-claude-skill install    - Install skill + hook to global (~/.claude/)
- *   npx wechat-claude-skill uninstall  - Remove skill + hook from global
- *   npx wechat-claude-skill vscode     - VSCode mode: QR login + hook (one-way notify)
- *   npx wechat-claude-skill cli        - CLI mode: QR login + bridge (bidirectional)
- *   npx wechat-claude-skill unbind     - Stop bridge + clean up (legacy, use uninstall)
+ * Usage (after npm install -g):
+ *   wechat-claude-skill install      Install skill + hook to global (~/.claude/)
+ *   wechat-claude-skill uninstall    Remove skill + hook from global
+ *   wechat-claude-skill vscode       VSCode mode: QR login + hook (one-way notify)
+ *   wechat-claude-skill cli          CLI mode: QR login + bridge (bidirectional)
  */
 
 import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync, rmdirSync } from 'node:fs';
@@ -20,7 +19,6 @@ const BRIDGE_PID_FILE = join(BRIDGE_DIR, 'bridge.pid');
 const STATE_FILE = join(BRIDGE_DIR, 'state.json');
 // Use forward slashes for cross-platform compatibility (exec form args)
 const HOOK_HANDLER_PATH = join(import.meta.dirname, 'hook-handler.js').replace(/\\/g, '/');
-const SETUP_PATH = join(import.meta.dirname, 'setup.js').replace(/\\/g, '/');
 
 // Global skill directory for Claude Code
 const GLOBAL_SKILL_DIR = join(homedir(), '.claude', 'skills', 'wechat');
@@ -223,10 +221,25 @@ async function setupCli(): Promise<void> {
   stopExistingBridge();
   await ensureAccount();
 
-  const sessionId = process.argv[3];
+  // Session ID can come from:
+  // 1. CLI argument: wechat-claude-skill cli <sessionId>
+  // 2. Environment variable: $CLAUDE_SESSION_ID (set by Claude Code)
+  let sessionId = process.argv[3] || process.env.CLAUDE_SESSION_ID;
+  if (!sessionId) {
+    console.log('⚠️  No session ID provided.');
+    console.log('   CLI bidirectional mode requires a session ID.');
+    console.log('   Usage: wechat-claude-skill cli <sessionId>');
+    console.log('   Or run from Claude Code skill (auto-provides $CLAUDE_SESSION_ID)');
+    console.log('');
+    console.log('   Falling back to VSCode mode (one-way notify)...\n');
+    writeHookConfig();
+    console.log('✅ 微信通知已启动 (VSCode 模式 - fallback)');
+    return;
+  }
+
   writeHookConfig();
 
-  console.log('\n✅ 微信双向绑定已启动 (CLI 模式)');
+  console.log(`\n✅ 微信双向绑定已启动 (CLI 模式, session=${sessionId})`);
   console.log('   Claude 回复 → 微信：自动推送');
   console.log('   微信回复 → Claude：PTY 注入（真实用户消息）');
   console.log('   按 Ctrl+C 退出\n');
@@ -246,22 +259,6 @@ async function setupVscode(): Promise<void> {
   console.log('\n✅ 微信通知已启动 (VSCode 模式)');
   console.log('   Claude 回复将自动推送到微信（单向通知）');
   console.log('   如需双向通信，请使用 CLI 模式');
-}
-
-// --- Unbind ---
-function unbind(): void {
-  console.log('Unbinding WeChat...');
-  stopExistingBridge();
-  removeHookConfig();
-
-  // Delete account.json
-  const accountPath = join(BRIDGE_DIR, 'account.json');
-  if (existsSync(accountPath)) {
-    unlinkSync(accountPath);
-    console.log('Account data deleted');
-  }
-
-  console.log('✅ 微信已解绑');
 }
 
 // --- Install: Install skill + hook to global ---
@@ -306,7 +303,7 @@ When the user runs \`/wechat\`, do the following:
 
    **For CLI terminal:**
    \`\`\`bash
-   wechat-claude-skill cli
+   wechat-claude-skill cli "$CLAUDE_SESSION_ID"
    \`\`\`
 
    **For VSCode:**
@@ -400,15 +397,15 @@ switch (action) {
   case 'vscode':
     setupVscode().catch((e) => { console.error('Setup failed:', e.message); process.exit(1); });
     break;
-  case 'unbind':  // Legacy, use uninstall
+  case 'unbind':  // Legacy alias for uninstall
     uninstallSkill();
     break;
   default:
     console.log('wechat-claude-skill - Claude Code WeChat Integration\n');
     console.log('Usage:');
-    console.log('  npx wechat-claude-skill install    Install skill + hook to global');
-    console.log('  npx wechat-claude-skill uninstall  Remove skill + hook');
-    console.log('  npx wechat-claude-skill vscode     Start VSCode mode (one-way notify)');
-    console.log('  npx wechat-claude-skill cli        Start CLI mode (bidirectional)');
+    console.log('  wechat-claude-skill install      Install skill + hook to global');
+    console.log('  wechat-claude-skill uninstall    Remove skill + hook');
+    console.log('  wechat-claude-skill vscode       Start VSCode mode (one-way notify)');
+    console.log('  wechat-claude-skill cli [sid]    Start CLI mode (bidirectional)');
     process.exit(1);
 }
