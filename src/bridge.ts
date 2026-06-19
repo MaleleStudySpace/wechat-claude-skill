@@ -26,7 +26,8 @@ const LOG_FILE = join(BRIDGE_DIR, 'bridge.log');
 
 // Log to file (since stdout is piped, not terminal)
 function log(msg: string): void {
-  const ts = new Date().toISOString();
+  const now = new Date();
+  const ts = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
   const line = `[${ts}] ${msg}\n`;
   try {
     appendFileSync(LOG_FILE, line, 'utf-8');
@@ -113,7 +114,18 @@ async function main() {
     const { message, session_id } = req.body;
     log(`Stop hook: session=${session_id}, msgLen=${message?.length || 0}`);
 
-    // Send response to WeChat
+    // VSCode mode: message is just "stop" notification, send brief notification
+    if (message === 'stop' && mode === 'vscode') {
+      log('VSCode mode: sending stop notification');
+      if (config.toUserId) {
+        const result = await sendMessage(config, config.toUserId, '💬 Claude 已回复');
+        log(`Notification result: ${JSON.stringify(result)}`);
+      }
+      res.json({ mode, ok: true });
+      return;
+    }
+
+    // CLI mode or full message: send to WeChat
     if (message && config.toUserId) {
       const formatted = formatForWeChat(message);
       log(`Attempting to send to WeChat: ${formatted.slice(0, 80)}...`);
@@ -127,20 +139,7 @@ async function main() {
       }
     }
 
-    // Check queue for pending WeChat messages
-    if (mode === 'vscode') {
-      // VSCode mode: return message for asyncRewake injection
-      const pending = queue.peek();
-      if (pending) {
-        const item = queue.dequeue()!;
-        res.json({ mode: 'vscode', inject: item.text, from: item.from });
-        return;
-      }
-      res.json({ mode: 'vscode', inject: null });
-    } else {
-      // CLI mode: PTY handles injection, just return OK
-      res.json({ mode: 'cli' });
-    }
+    res.json({ mode, ok: true });
   });
 
   // Start HTTP server

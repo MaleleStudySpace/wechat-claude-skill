@@ -1,18 +1,32 @@
 /**
- * Stop hook handler script.
+ * Stop hook handler.
  *
- * This script is called by Claude Code's Stop hook (asyncRewake).
- * It reads the hook input (stdin), extracts the assistant's response
- * from the transcript, sends it to the bridge, and checks the queue.
+ * Triggered by Claude Code's Stop event (fires when Claude finishes responding).
+ * Reads `last_assistant_message` from stdin and sends it to WeChat.
  *
- * For CLI mode: bridge handles injection via PTY, this just forwards.
- * For VSCode mode: returns WeChat message as stderr + exit 2.
+ * Works for both VSCode and CLI modes:
+ * - VSCode: one-way notification (Claude → WeChat)
+ * - CLI: one-way notification here; bridge handles WeChat → Claude via PTY
+ *
+ * Exit 0: normal exit, Claude stays stopped (ready for next user input)
  */
 
-import { readFileSync } from 'node:fs';
+import { appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { loadAccount } from './auth.js';
+import { sendMessage } from './wechat.js';
+import type { BridgeConfig } from './config.js';
 
-const BRIDGE_URL = 'http://localhost:3456';
+const LOG_FILE = join(homedir(), '.wechat-claude-skill', 'hook-handler.log');
+const MAX_MESSAGE_LENGTH = 4000;
+
+function debugLog(msg: string): void {
+  const now = new Date();
+  const beijingTime = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+  try { appendFileSync(LOG_FILE, `[${beijingTime}] ${msg}\n`); } catch {}
+}
 
 async function readStdin(): Promise<string> {
   const rl = createInterface({ input: process.stdin });
@@ -23,85 +37,60 @@ async function readStdin(): Promise<string> {
   return lines.join('\n');
 }
 
-function extractLastAssistantMessage(transcriptPath: string): string {
-  try {
-    const content = readFileSync(transcriptPath, 'utf-8');
-    const lines = content.trim().split('\n').filter(Boolean);
-    // Walk backwards to find the last assistant message
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const entry = JSON.parse(lines[i]);
-        if (entry.role === 'assistant' && entry.content) {
-          // content can be string or array of content blocks
-          if (typeof entry.content === 'string') {
-            return entry.content;
-          }
-          if (Array.isArray(entry.content)) {
-            const textBlocks = entry.content
-              .filter((b: any) => b.type === 'text')
-              .map((b: any) => b.text);
-            return textBlocks.join('\n');
-          }
-        }
-      } catch {
-        // skip unparseable lines
-      }
-    }
-  } catch {
-    // transcript not readable
-  }
-  return '';
-}
+async function main(): Promise<void> {
+  // Log immediately — proves the hook was triggered
+  debugLog('=== Hook triggered ===');
 
-async function main() {
-  // 1. Read hook input from stdin
+  // Read hook input from stdin
   const inputStr = await readStdin();
+  debugLog(`stdin length: ${inputStr.length}`);
+
   let hookInput: any = {};
-  try {
-    hookInput = JSON.parse(inputStr);
-  } catch {
-    // stdin might be empty or non-JSON
+  try { hookInput = JSON.parse(inputStr); } catch {
+    debugLog('Failed to parse stdin as JSON, continuing');
   }
 
-  const transcriptPath = hookInput.transcript_path;
-  if (!transcriptPath) {
+  // Use last_assistant_message from hook input (provided by Claude Code)
+  const message: string | undefined = hookInput.last_assistant_message;
+  if (!message || !message.trim()) {
+    debugLog('No assistant message in hook input, exiting');
     process.exit(0);
   }
 
-  // 2. Extract last assistant message
-  const message = extractLastAssistantMessage(transcriptPath);
-  if (!message) {
+  debugLog(`Message length: ${message.length}`);
+
+  // Load account
+  const account = loadAccount();
+  if (!account) {
+    debugLog('No account found, exiting');
     process.exit(0);
   }
 
-  // 3. POST to bridge
-  try {
-    const resp = await fetch(`${BRIDGE_URL}/hooks/stop`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_id: hookInput.session_id,
-        message,
-        cwd: hookInput.cwd,
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
+  const config: BridgeConfig = {
+    botToken: account.botToken,
+    accountId: account.accountId,
+    toUserId: account.userId,
+    baseUrl: account.baseUrl,
+    port: 3456,
+    pollInterval: 3000,
+  };
 
-    const data = await resp.json() as any;
+  // Truncate if too long
+  const text = message.length > MAX_MESSAGE_LENGTH
+    ? message.slice(0, MAX_MESSAGE_LENGTH) + '\n\n... (消息过长，已截断)'
+    : message;
 
-    // 4. Check if there's a WeChat message to inject (VSCode mode)
-    if (data.mode === 'vscode' && data.inject) {
-      // Output WeChat message as stderr → Claude gets it as system reminder
-      process.stderr.write(`【微信消息 from ${data.from}】：${data.inject}`);
-      process.exit(2); // Wake Claude
-    }
+  // Send to WeChat
+  debugLog('Sending to WeChat...');
+  const result = await sendMessage(config, account.userId, text);
 
-    // CLI mode: bridge handles injection via PTY, just exit normally
-    process.exit(0);
-  } catch {
-    // Bridge not running or error
-    process.exit(0);
+  if (result.success) {
+    debugLog(`Sent successfully (msgId: ${result.msgId || 'unknown'})`);
+  } else {
+    debugLog(`Send failed: ${result.error}`);
   }
+
+  process.exit(0);
 }
 
 main();

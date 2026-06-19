@@ -1,24 +1,30 @@
 /**
  * Setup script for wechat-claude-skill.
  *
- * Called by the /wechat or /unwechat skill.
- *
  * Usage:
- *   node setup.js cli [sessionId]   - CLI mode: QR login + start bridge + PTY
- *   node setup.js vscode            - VSCode mode: QR login + start bridge + hooks
- *   node setup.js unbind            - Stop bridge + clean up
+ *   npx wechat-claude-skill install    - Install skill + hook to global (~/.claude/)
+ *   npx wechat-claude-skill uninstall  - Remove skill + hook from global
+ *   npx wechat-claude-skill vscode     - VSCode mode: QR login + hook (one-way notify)
+ *   npx wechat-claude-skill cli        - CLI mode: QR login + bridge (bidirectional)
+ *   npx wechat-claude-skill unbind     - Stop bridge + clean up (legacy, use uninstall)
  */
 
-import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync, rmdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { loadAccount, interactiveLogin, type AccountData } from './auth.js';
 import { BRIDGE_DIR } from './config.js';
 
 const BRIDGE_PID_FILE = join(BRIDGE_DIR, 'bridge.pid');
 const STATE_FILE = join(BRIDGE_DIR, 'state.json');
-const HOOK_HANDLER_PATH = join(import.meta.dirname, 'hook-handler.js');
+// Use forward slashes for cross-platform compatibility (exec form args)
+const HOOK_HANDLER_PATH = join(import.meta.dirname, 'hook-handler.js').replace(/\\/g, '/');
+const SETUP_PATH = join(import.meta.dirname, 'setup.js').replace(/\\/g, '/');
+
+// Global skill directory for Claude Code
+const GLOBAL_SKILL_DIR = join(homedir(), '.claude', 'skills', 'wechat');
+const GLOBAL_SKILL_FILE = join(GLOBAL_SKILL_DIR, 'SKILL.md');
 
 interface State {
   mode: 'cli' | 'vscode';
@@ -52,6 +58,7 @@ function isBridgeRunning(pid: number): boolean {
 }
 
 function stopExistingBridge(): void {
+  // Kill by saved PID first
   const state = loadState();
   if (state && isBridgeRunning(state.pid)) {
     console.log(`Stopping existing bridge (PID ${state.pid})...`);
@@ -61,6 +68,17 @@ function stopExistingBridge(): void {
       if (!isBridgeRunning(state.pid)) break;
     }
   }
+
+  // Also kill any process listening on port 3456
+  try {
+    const result = execSync('powershell -Command "Get-NetTCPConnection -LocalPort 3456 -ErrorAction SilentlyContinue | Select-Object OwningProcess"', { encoding: 'utf-8' });
+    const pids = result.split('\n').map((s: string) => parseInt(s.trim())).filter((p: number) => p > 0 && p !== process.pid);
+    for (const pid of pids) {
+      console.log(`Killing process on port 3456 (PID ${pid})...`);
+      try { process.kill(pid, 'SIGTERM'); } catch {}
+    }
+  } catch {}
+
   try { unlinkSync(BRIDGE_PID_FILE); } catch {}
   try { unlinkSync(STATE_FILE); } catch {}
 }
@@ -82,8 +100,30 @@ async function ensureAccount(): Promise<AccountData> {
 }
 
 function getClaudeSettingsPath(): string {
-  // Always use project-level: {cwd}/.claude/settings.json
-  return join(process.cwd(), '.claude', 'settings.json');
+  // Use global settings: ~/.claude/settings.json
+  return join(homedir(), '.claude', 'settings.json');
+}
+
+/**
+ * Remove all hook-handler entries from all hook events in settings.
+ * Returns the cleaned settings object.
+ */
+function removeAllHookHandlerEntries(settings: any): any {
+  if (!settings.hooks) return settings;
+  for (const eventName of Object.keys(settings.hooks)) {
+    const entries = settings.hooks[eventName];
+    if (!Array.isArray(entries)) continue;
+    // Filter out entries that contain hook-handler in any of their hooks
+    settings.hooks[eventName] = entries.filter((entry: any) =>
+      !entry.hooks?.some((h: any) =>
+        (h.command && h.command.includes('hook-handler')) ||
+        (h.args && h.args.some((a: string) => a.includes('hook-handler')))
+      )
+    );
+    if (settings.hooks[eventName].length === 0) delete settings.hooks[eventName];
+  }
+  if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+  return settings;
 }
 
 function writeHookConfig(): void {
@@ -93,15 +133,22 @@ function writeHookConfig(): void {
     try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')); } catch {}
   }
 
+  // Remove ALL existing hook-handler entries from ALL events (Stop, Notification, etc.)
+  // This cleans up any stale registrations from previous versions
+  settings = removeAllHookHandlerEntries(settings);
+
+  // Add the hook to Stop event only, using exec form to avoid shell path issues
   settings.hooks = settings.hooks || {};
-  settings.hooks.Stop = [{
+  settings.hooks.Stop = settings.hooks.Stop || [];
+  settings.hooks.Stop.push({
     hooks: [{
       type: 'command',
-      command: `node ${HOOK_HANDLER_PATH}`,
-      asyncRewake: true,
-      timeout: 3600,
+      command: 'node',
+      args: [HOOK_HANDLER_PATH],
+      async: true,
+      timeout: 60,
     }],
-  }];
+  });
 
   const dir = join(settingsPath, '..');
   mkdirSync(dir, { recursive: true });
@@ -114,16 +161,13 @@ function removeHookConfig(): void {
   if (!existsSync(settingsPath)) return;
   try {
     const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
-    if (settings.hooks?.Stop) {
-      delete settings.hooks.Stop;
-      if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
-    }
+    removeAllHookHandlerEntries(settings);
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
     console.log(`Hook config removed from: ${settingsPath}`);
   } catch {}
 }
 
-function startBridge(mode: 'cli' | 'vscode', sessionId?: string): void {
+function startBridgeDetached(mode: 'cli' | 'vscode', sessionId?: string): void {
   const bridgePath = join(import.meta.dirname, 'bridge.js');
   const args = [bridgePath, '--mode', mode];
   if (sessionId) args.push('--session', sessionId);
@@ -159,35 +203,49 @@ function startBridge(mode: 'cli' | 'vscode', sessionId?: string): void {
   });
 }
 
+// Run bridge directly in current process (for CLI mode)
+async function runBridgeDirectly(mode: 'cli' | 'vscode', sessionId?: string): Promise<void> {
+  // Set command line arguments for bridge
+  process.argv = ['node', 'bridge.js', '--mode', mode];
+  if (sessionId) process.argv.push('--session', sessionId);
+  process.argv.push('--cwd', process.cwd());
+
+  // Import and run bridge (use file:// URL for Windows)
+  const bridgePath = join(import.meta.dirname, 'bridge.js');
+  const bridgeUrl = `file:///${bridgePath.replace(/\\/g, '/')}`;
+  await import(bridgeUrl);
+}
+
 // --- CLI mode ---
 async function setupCli(): Promise<void> {
-  console.log('Setting up WeChat binding (CLI mode)...\n');
+  console.log('Starting WeChat binding (CLI mode)...\n');
 
   stopExistingBridge();
   await ensureAccount();
 
   const sessionId = process.argv[3];
-  startBridge('cli', sessionId);
   writeHookConfig();
 
-  console.log('\n✅ 微信绑定已启动 (CLI 模式)');
-  console.log('   微信消息将作为用户输入注入（100% 可靠）');
-  console.log('\n⚠️  当前 Claude Code 会话即将退出，bridge 将启动新会话...');
+  console.log('\n✅ 微信双向绑定已启动 (CLI 模式)');
+  console.log('   Claude 回复 → 微信：自动推送');
+  console.log('   微信回复 → Claude：PTY 注入（真实用户消息）');
+  console.log('   按 Ctrl+C 退出\n');
+
+  // Run bridge directly (blocking, user interacts in terminal)
+  await runBridgeDirectly('cli', sessionId);
 }
 
 // --- VSCode mode ---
 async function setupVscode(): Promise<void> {
   console.log('Setting up WeChat binding (VSCode mode)...\n');
 
-  stopExistingBridge();
-  await ensureAccount();
+  stopExistingBridge();  // Clean up any existing bridge
+  await ensureAccount();  // Check/create account
+  writeHookConfig();  // Write hook config
 
-  startBridge('vscode');
-  writeHookConfig();
-
-  console.log('\n✅ 微信绑定已启动 (VSCode 模式)');
-  console.log('   ⚠️  微信回复将作为系统提醒注入，大概率会被处理');
-  console.log('   如需 100% 可靠，请使用 CLI 终端模式');
+  console.log('\n✅ 微信通知已启动 (VSCode 模式)');
+  console.log('   Claude 回复将自动推送到微信（单向通知）');
+  console.log('   如需双向通信，请使用 CLI 模式');
 }
 
 // --- Unbind ---
@@ -195,22 +253,145 @@ function unbind(): void {
   console.log('Unbinding WeChat...');
   stopExistingBridge();
   removeHookConfig();
+
+  // Delete account.json
+  const accountPath = join(BRIDGE_DIR, 'account.json');
+  if (existsSync(accountPath)) {
+    unlinkSync(accountPath);
+    console.log('Account data deleted');
+  }
+
   console.log('✅ 微信已解绑');
+}
+
+// --- Install: Install skill + hook to global ---
+function installSkill(): void {
+  console.log('Installing wechat-claude-skill...\n');
+
+  // 1. Write hook config to global settings
+  writeHookConfig();
+
+  // 2. Generate and write SKILL.md to global skills directory
+  const skillContent = `---
+name: wechat
+description: Sync Claude Code conversations to WeChat. Use when user runs /wechat to enable WeChat notifications or bidirectional communication.
+---
+
+# WeChat Integration for Claude Code
+
+When the user runs \`/wechat\`, do the following:
+
+1. Ask the user to select their environment:
+   - "1. CLI 终端（双向通信：可从微信回复）"
+   - "2. VSCode（单向通知：仅推送 Claude 回复）"
+
+2. Based on their choice, run the appropriate command:
+
+   **For CLI terminal:**
+   \`\`\`bash
+   node "${SETUP_PATH}" cli
+   \`\`\`
+
+   **For VSCode:**
+   \`\`\`bash
+   node "${SETUP_PATH}" vscode
+   \`\`\`
+
+3. After running the command:
+   - For CLI: Tell the user "微信双向绑定已启动，Claude Code 将自动重启.." then EXIT this session
+   - For VSCode: Tell the user the binding is complete. Claude replies will be pushed to WeChat automatically.
+
+## Features
+
+- **VSCode 模式**: Stop hook → 微信单向通知
+- **CLI 模式**: Stop hook → 微信通知 + PTY 注入双向通信
+- 使用 iLink Bot API，无需登录微信
+
+## Uninstall
+
+Run \`/unwechat\` or \`npx wechat-claude-skill uninstall\`
+`;
+
+  mkdirSync(GLOBAL_SKILL_DIR, { recursive: true });
+  writeFileSync(GLOBAL_SKILL_FILE, skillContent);
+  console.log(`Skill installed to: ${GLOBAL_SKILL_FILE}`);
+
+  // 3. Also write unwechat skill
+  const unwechatContent = `---
+name: unwechat
+description: Unbind WeChat from Claude Code. Use when user runs /unwechat to disable WeChat notifications.
+---
+
+# Unbind WeChat
+
+When the user runs \`/unwechat\`, run:
+
+\`\`\`bash
+node "${SETUP_PATH}" uninstall
+\`\`\`
+
+Tell the user WeChat has been unbound.
+`;
+
+  const unwechatDir = join(homedir(), '.claude', 'skills', 'unwechat');
+  mkdirSync(unwechatDir, { recursive: true });
+  writeFileSync(join(unwechatDir, 'SKILL.md'), unwechatContent);
+  console.log(`Skill installed to: ${join(unwechatDir, 'SKILL.md')}`);
+
+  console.log('\n✅ Installation complete!');
+  console.log('   Run /wechat in Claude Code to start binding.');
+}
+
+// --- Uninstall: Remove skill + hook from global ---
+function uninstallSkill(): void {
+  console.log('Uninstalling wechat-claude-skill...\n');
+
+  // 1. Stop bridge and remove hook config
+  stopExistingBridge();
+  removeHookConfig();
+
+  // 2. Remove global skill files
+  try { unlinkSync(GLOBAL_SKILL_FILE); } catch {}
+  try { unlinkSync(join(homedir(), '.claude', 'skills', 'unwechat', 'SKILL.md')); } catch {}
+
+  // 3. Remove empty skill directories
+  try { rmdirSync(GLOBAL_SKILL_DIR); } catch {}
+  try { rmdirSync(join(homedir(), '.claude', 'skills', 'unwechat')); } catch {}
+
+  // 4. Delete account.json
+  const accountPath = join(BRIDGE_DIR, 'account.json');
+  if (existsSync(accountPath)) {
+    unlinkSync(accountPath);
+    console.log('Account data deleted');
+  }
+
+  console.log('✅ Uninstallation complete!');
 }
 
 // --- Main ---
 const action = process.argv[2];
 switch (action) {
+  case 'install':
+    installSkill();
+    break;
+  case 'uninstall':
+    uninstallSkill();
+    break;
   case 'cli':
     setupCli().catch((e) => { console.error('Setup failed:', e.message); process.exit(1); });
     break;
   case 'vscode':
     setupVscode().catch((e) => { console.error('Setup failed:', e.message); process.exit(1); });
     break;
-  case 'unbind':
-    unbind();
+  case 'unbind':  // Legacy, use uninstall
+    uninstallSkill();
     break;
   default:
-    console.error('Usage: node setup.js [cli|vscode|unbind]');
+    console.log('wechat-claude-skill - Claude Code WeChat Integration\n');
+    console.log('Usage:');
+    console.log('  npx wechat-claude-skill install    Install skill + hook to global');
+    console.log('  npx wechat-claude-skill uninstall  Remove skill + hook');
+    console.log('  npx wechat-claude-skill vscode     Start VSCode mode (one-way notify)');
+    console.log('  npx wechat-claude-skill cli        Start CLI mode (bidirectional)');
     process.exit(1);
 }

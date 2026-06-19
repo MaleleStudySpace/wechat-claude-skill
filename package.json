@@ -3,8 +3,15 @@
   "version": "1.0.0",
   "description": "Claude Code skill: sync conversation to WeChat via iLink API",
   "type": "module",
+  "bin": {
+    "wechat-claude-skill": "./dist/setup.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/postbuild.js",
     "dev": "tsx src/bridge.ts"
   },
   "dependencies": {

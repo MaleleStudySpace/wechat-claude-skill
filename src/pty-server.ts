@@ -9,8 +9,7 @@
  */
 
 import * as pty from 'node-pty';
-import { writeFileSync, existsSync, mkdirSync, openSync, writeSync, readSync, closeSync } from 'node:fs';
-import { createWriteStream, createReadStream } from 'node:fs';
+import { writeFileSync, existsSync, mkdirSync, appendFileSync, createWriteStream, createReadStream } from 'node:fs';
 import type { WriteStream, ReadStream } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -19,6 +18,7 @@ import type { MessageQueue } from './queue.js';
 
 const BRIDGE_DIR = join(homedir(), '.wechat-claude-skill');
 const PTY_PID_FILE = join(BRIDGE_DIR, 'pty.pid');
+const LOG_FILE = join(BRIDGE_DIR, 'bridge.log');
 
 export interface PTYServerOptions {
   sessionId: string;
@@ -83,7 +83,9 @@ export class PTYServer {
     const cols = (this.terminal.output as NodeJS.WriteStream).columns || 120;
     const rows = (this.terminal.output as NodeJS.WriteStream).rows || 30;
 
-    this.ptyProcess = pty.spawn('claude', args, {
+    // On Windows, use claude.cmd (node-pty can't run POSIX shell scripts directly)
+    const claudeCmd = process.platform === 'win32' ? 'claude.cmd' : 'claude';
+    this.ptyProcess = pty.spawn(claudeCmd, args, {
       name: 'xterm-256color',
       cols,
       rows,
@@ -177,7 +179,15 @@ export class PTYServer {
   }
 
   private log(msg: string): void {
-    const output = this.terminal.output as NodeJS.WritableStream;
-    output.write(`[PTY] ${msg}\n`);
+    const now = new Date();
+    const ts = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+    const line = `[${ts}] [PTY] ${msg}\n`;
+    try {
+      appendFileSync(LOG_FILE, line, 'utf-8');
+    } catch {}
+    // Also write to terminal if available
+    if (this.terminal) {
+      this.terminal.output.write(`[PTY] ${msg}\n`);
+    }
   }
 }

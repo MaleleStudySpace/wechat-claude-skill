@@ -48,7 +48,7 @@ const ROLE_OWNER = 3;
 
 // Rate limit constants (from wechat-claude-code)
 const MIN_SEND_INTERVAL_MS = 2_500;
-const SEND_MAX_RETRIES = 2;
+const SEND_MAX_RETRIES = 3;  // 3s → 6s → 12s
 const SEND_RETRY_DELAY_MS = 3_000;
 const SEND_RETRY_MAX_DELAY_MS = 15_000;
 
@@ -324,7 +324,7 @@ async function sendMessageWithRateLimit(
       if (ret === RATE_LIMIT_ERRCODE) {
         nextSendTime.set(to, Date.now() + delay + MIN_SEND_INTERVAL_MS);
         if (attempt === SEND_MAX_RETRIES) {
-          return { success: false, error: `rate-limited after ${SEND_MAX_RETRIES} retries` };
+          return { success: false, error: `rate-limited after ${SEND_MAX_RETRIES} retries, json=${JSON.stringify(json)}` };
         }
         await sleep(delay);
         delay = Math.min(delay * 2, SEND_RETRY_MAX_DELAY_MS);
