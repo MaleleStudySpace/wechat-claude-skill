@@ -142,6 +142,7 @@ export class PTYServer {
         // would cause Claude Code to process it as a new user request,
         // potentially re-triggering the /wechat skill or other unwanted actions.
         // The bridge should only inject messages that come from WeChat.
+        setTimeout(() => this.showReadyNotice(), 300);
       }
       // Write directly to terminal device
       this.terminal.output.write(data);
@@ -283,6 +284,31 @@ export class PTYServer {
         this.ptyProcess.write('\r');
       }
     }, 50);
+  }
+
+  /**
+   * Show a prominent notice in the terminal after Claude Code is ready.
+   * Uses a Windows message box (MsgBox) since Claude Code's TUI uses
+   * alternate screen buffer which overwrites any terminal output.
+   * The message box stays on top and requires user acknowledgment.
+   */
+  private showReadyNotice(): void {
+    this.log('Showing ready notice');
+    if (process.platform === 'win32') {
+      // Use PowerShell to show a message box - this pops above all windows
+      const { spawn } = require('child_process');
+      const ps = spawn('powershell', [
+        '-Command',
+        'Add-Type -AssemblyName PresentationFramework; ' +
+        '[System.Windows.MessageBox]::Show(' +
+        '"✅ 微信双向通信已就绪！\\n\\n' +
+        '📱 微信消息 → 自动注入此窗口\\n' +
+        '💬 Claude回复 → 自动推送到微信\\n\\n' +
+        '⚠️ 请关闭旧窗口，在此窗口继续对话", ' +
+        '"📱 微信双向通信", "OK", "Information")',
+      ], { detached: true, stdio: 'ignore' });
+      ps.unref();
+    }
   }
 
   private log(msg: string): void {
