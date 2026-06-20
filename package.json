@@ -4,7 +4,7 @@
   "description": "Claude Code skill: sync conversation to WeChat via iLink API",
   "type": "module",
   "bin": {
-    "wechat-claude-skill": "./dist/setup.js"
+    "wechat-claude-skill": "dist/setup.js"
   },
   "files": [
     "dist",
