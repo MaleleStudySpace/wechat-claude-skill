@@ -9,7 +9,6 @@
  */
 
 import * as pty from 'node-pty';
-import { spawn } from 'node:child_process';
 import { writeFileSync, existsSync, mkdirSync, appendFileSync, createWriteStream, createReadStream, unlinkSync } from 'node:fs';
 import type { WriteStream, ReadStream } from 'node:fs';
 import { join } from 'node:path';
@@ -134,8 +133,9 @@ export class PTYServer {
       // Show banner AFTER Claude Code has started (first ❯ prompt detected)
       if (!bannerShown && hasIdlePrompt) {
         bannerShown = true;
-        // Use ANSI escape to set terminal title - survives TUI redraws
-        this.terminal.output.write('\x1b]2;📱 微信双向通信窗口 — WeChat Bridge\x07');
+        // Set a distinctive window title so user can identify this window.
+        // ANSI \x1b]2;...\x07 survives Claude Code TUI redraws.
+        this.terminal.output.write('\x1b]2;[微信桥接] Claude Code — WeChat Bridge\x07');
         this.log('Banner set: window title');
 
         // Inject a context-reset message to tell Claude Code that /wechat
@@ -156,8 +156,6 @@ export class PTYServer {
             }, 50);
           }
         }, 500);
-
-        setTimeout(() => this.showReadyNotice(), 1000);
       }
       // Write directly to terminal device
       this.terminal.output.write(data);
@@ -299,45 +297,6 @@ export class PTYServer {
         this.ptyProcess.write('\r');
       }
     }, 50);
-  }
-
-  /**
-   * Show a prominent notice after Claude Code is ready.
-   * Uses a VBScript MsgBox via cscript — more reliable than PowerShell
-   * on Windows because it doesn't depend on PresentationFramework.
-   */
-  private showReadyNotice(): void {
-    this.log('Showing ready notice');
-    if (process.platform === 'win32') {
-      try {
-        // Write a temporary .vbs file and execute it with cscript
-        const { writeFileSync, unlinkSync } = require('node:fs');
-        const { join } = require('node:path');
-        const { tmpdir } = require('node:os');
-        const vbsPath = join(tmpdir(), 'wechat-bridge-notice.vbs');
-        const vbsContent = `
-MsgBox "微信双向通信已就绪！" & vbCrLf & vbCrLf & _
-"· 微信消息 → 自动注入此窗口" & vbCrLf & _
-"· Claude回复 → 自动推送到微信" & vbCrLf & vbCrLf & _
-"请手动关闭旧窗口，在此窗口继续对话", _
-vbInformation, "微信双向通信"
-`.trim();
-        writeFileSync(vbsPath, vbsContent, 'utf-8');
-        const ps = spawn('cscript.exe', ['//nologo', vbsPath], {
-          detached: true,
-          stdio: 'ignore',
-          windowsHide: false,
-        });
-        ps.unref();
-        // Clean up VBS file after a delay
-        setTimeout(() => {
-          try { unlinkSync(vbsPath); } catch {}
-        }, 30000);
-        this.log('VBS notice spawned (PID ' + (ps.pid || 'unknown') + ')');
-      } catch (e: any) {
-        this.log('Failed to show notice: ' + e.message);
-      }
-    }
   }
 
   private log(msg: string): void {

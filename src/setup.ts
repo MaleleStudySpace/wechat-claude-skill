@@ -405,7 +405,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 
 // Set CMD window title - this survives Claude Code TUI redraws
-process.stdout.write('\\x1b]2;\\x1b[5m\\x1b[1;33m 📱 微信双向通信窗口 \\x1b[0m\\x07');
+process.stdout.write('\\x1b]2;[微信桥接] Claude Code — WeChat Bridge\\x07');
 
 // Print prominent banner BEFORE starting bridge
 console.log('');
