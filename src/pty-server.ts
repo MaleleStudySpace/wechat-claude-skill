@@ -78,8 +78,19 @@ export class PTYServer {
    */
   private lastOutputTime = 0;
 
+  /** Whether Claude Code has finished its initial startup output. */
+  private startupComplete = false;
+
+  /** Timestamp when PTY was started. */
+  private startTime = 0;
+
   /** Interval (ms) during which Claude is considered busy after last output. */
   private static readonly BUSY_THRESHOLD_MS = 2000;
+
+  /** Grace period (ms) after startup before input lock kicks in.
+   *  Claude Code outputs a lot during startup; we don't want to block
+   *  the first WeChat message for 10+ seconds. */
+  private static readonly STARTUP_GRACE_MS = 5000;
 
   constructor(private options: PTYServerOptions) {
     this.terminal = openTerminal();
@@ -88,6 +99,7 @@ export class PTYServer {
   start(): void {
     if (this.running) return;
     this.running = true;
+    this.startTime = Date.now();
 
     // Use --continue (most recent conversation) if no sessionId,
     // or --resume <sessionId> if sessionId is provided
@@ -96,6 +108,12 @@ export class PTYServer {
       : ['--continue'];
     this.log(`Starting: claude ${args.join(' ')}`);
     this.log(`Working directory: ${this.options.cwd}`);
+
+    this.terminal.output.write('\x1b[36m========================================\x1b[0m\n');
+    this.terminal.output.write('\x1b[36m  Claude Code - 微信双向通信新窗口\x1b[0m\n');
+    this.terminal.output.write('\x1b[36m========================================\x1b[0m\n');
+    this.terminal.output.write('这个窗口用于继续 Claude Code 对话，并接收微信消息。\n');
+    this.terminal.output.write('微信消息会显示为 [微信 HH:MM:SS]，并自动发送给 Claude。\n\n');
 
     // Get terminal dimensions
     const cols = (this.terminal.output as NodeJS.WriteStream).columns || 120;
@@ -212,15 +230,21 @@ export class PTYServer {
     pending.sort((a, b) => a.timestamp - b.timestamp);
     for (const item of pending) {
       this.log(`Injecting WeChat message from ${item.from}: ${item.text}`);
-      this.ptyProcess.write(item.text + '\n');
+      // Windows ConPTY requires \r for Enter, Unix PTY uses \n
+      this.ptyProcess.write(item.text + '\r');
     }
   }
 
   /**
    * Check if Claude is currently busy generating a response.
    * Returns true if output was received within the last BUSY_THRESHOLD_MS (2 seconds).
+   * During startup grace period, always returns false so messages aren't blocked.
    */
   private isClaudeBusy(): boolean {
+    // Grace period: don't block during Claude Code startup
+    if (Date.now() - this.startTime < PTYServer.STARTUP_GRACE_MS) {
+      return false;
+    }
     return Date.now() - this.lastOutputTime < PTYServer.BUSY_THRESHOLD_MS;
   }
 
