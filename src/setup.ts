@@ -437,8 +437,9 @@ process.on('SIGINT', () => { child.kill(); process.exit(0); });
     shell: false,
   }).unref();
 
-  // Wait for new window to open
-  await new Promise(r => setTimeout(r, 1500));
+  // Don't wait — the new window opens asynchronously and the parent
+  // process (wechat-claude-skill cli) should exit quickly so that
+  // Claude Code's Bash command finishes and the user can continue.
 }
 
 // --- VSCode mode ---

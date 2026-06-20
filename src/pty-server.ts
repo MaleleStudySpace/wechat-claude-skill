@@ -303,31 +303,37 @@ export class PTYServer {
 
   /**
    * Show a prominent notice after Claude Code is ready.
-   * Uses a Windows message box via PowerShell since Claude Code's TUI
-   * uses alternate screen buffer which overwrites any terminal output.
+   * Uses a VBScript MsgBox via cscript — more reliable than PowerShell
+   * on Windows because it doesn't depend on PresentationFramework.
    */
   private showReadyNotice(): void {
     this.log('Showing ready notice');
     if (process.platform === 'win32') {
       try {
-        const msg = [
-          'Add-Type -AssemblyName PresentationFramework;',
-          '[System.Windows.MessageBox]::Show(',
-          '"微信双向通信已就绪！',
-          '',
-          '· 微信消息 → 自动注入此窗口',
-          '· Claude回复 → 自动推送到微信',
-          '',
-          '请手动关闭旧窗口，在此窗口继续对话",',
-          '"微信双向通信", "OK", "Information")',
-        ].join(' ');
-        const ps = spawn('powershell.exe', ['-NoProfile', '-Command', msg], {
+        // Write a temporary .vbs file and execute it with cscript
+        const { writeFileSync, unlinkSync } = require('node:fs');
+        const { join } = require('node:path');
+        const { tmpdir } = require('node:os');
+        const vbsPath = join(tmpdir(), 'wechat-bridge-notice.vbs');
+        const vbsContent = `
+MsgBox "微信双向通信已就绪！" & vbCrLf & vbCrLf & _
+"· 微信消息 → 自动注入此窗口" & vbCrLf & _
+"· Claude回复 → 自动推送到微信" & vbCrLf & vbCrLf & _
+"请手动关闭旧窗口，在此窗口继续对话", _
+vbInformation, "微信双向通信"
+`.trim();
+        writeFileSync(vbsPath, vbsContent, 'utf-8');
+        const ps = spawn('cscript.exe', ['//nologo', vbsPath], {
           detached: true,
           stdio: 'ignore',
           windowsHide: false,
         });
         ps.unref();
-        this.log('PowerShell notice spawned (PID ' + (ps.pid || 'unknown') + ')');
+        // Clean up VBS file after a delay
+        setTimeout(() => {
+          try { unlinkSync(vbsPath); } catch {}
+        }, 30000);
+        this.log('VBS notice spawned (PID ' + (ps.pid || 'unknown') + ')');
       } catch (e: any) {
         this.log('Failed to show notice: ' + e.message);
       }
