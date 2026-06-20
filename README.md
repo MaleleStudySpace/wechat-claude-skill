@@ -13,7 +13,7 @@
 - 📺 **VSCode 模式**：在 VSCode 中使用 Claude Code，回复自动推送微信
 - 🔐 **QR 扫码登录**：终端展示二维码 + 自动打开浏览器，1 秒轮询
 - 🛡️ **消息去重 & 限流**：内置 iLink API 限流退避和会话过期重试
-- 📦 **一键安装**：`npm install -g` + `/wechat` 即可使用
+- 📦 **一键安装**：`npm install -g` 即可，自动配置 Skill 和 Hook
 
 ## 安装
 
@@ -23,24 +23,13 @@
 - Claude Code CLI（`npm install -g @anthropic-ai/claude-code`）
 - 微信账号（用于扫描 QR 码绑定 Bot）
 
-### 全局安装
+### 安装
 
 ```bash
 npm install -g wechat-claude-skill
 ```
 
-### 初始化
-
-```bash
-wechat-claude-skill install
-```
-
-这会完成：
-
-1. 将 Skill 和 Hook 写入 `~/.claude/` 全局配置
-2. 安装 `/wechat` 和 `/unwechat` 两个 Slash 命令
-
-> 扫码登录在执行 `/wechat` 时自动触发，无需提前操作。
+安装完成后自动配置 Skill 和 Hook，无需额外操作。扫码登录在首次执行 `/wechat` 时触发。
 
 ## 使用
 
