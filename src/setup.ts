@@ -387,8 +387,7 @@ async function setupCli(): Promise<void> {
   console.log('   📱 微信发消息 → 自动注入到 Claude');
   console.log('   💬 Claude 回复 → 自动推送到微信');
   console.log('');
-  console.log('💡 请输入 /exit 退出当前 Claude Code 会话');
-  console.log('   然后切换到新打开的终端窗口继续对话');
+  console.log('💡 请手动关闭此窗口，然后切换到新窗口继续对话');
 }
 
 /**
@@ -518,7 +517,7 @@ When the user runs \`/wechat\`, do the following:
 3. After running the command:
    - For CLI: Tell the user in Chinese:
      "✅ 微信双向绑定已启动！已自动打开新终端窗口。
-     请输入 /exit 退出当前会话，然后切换到新窗口继续对话。
+     请手动关闭此窗口，然后切换到新窗口继续对话。
      在新窗口中你可以和 Claude 对话，也可以在微信中发消息自动注入。"
    - For VSCode: Tell the user in Chinese:
      "✅ 微信通知已绑定成功！请立即在微信中给你刚绑定的 Bot 发一条消息（任意内容），这是激活 Bot 的必要步骤。之后 Claude 的回复就会自动推送到微信了。"

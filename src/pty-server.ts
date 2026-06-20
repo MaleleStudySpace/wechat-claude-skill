@@ -9,6 +9,7 @@
  */
 
 import * as pty from 'node-pty';
+import { spawn } from 'node:child_process';
 import { writeFileSync, existsSync, mkdirSync, appendFileSync, createWriteStream, createReadStream, unlinkSync } from 'node:fs';
 import type { WriteStream, ReadStream } from 'node:fs';
 import { join } from 'node:path';
@@ -301,27 +302,35 @@ export class PTYServer {
   }
 
   /**
-   * Show a prominent notice in the terminal after Claude Code is ready.
-   * Uses a Windows message box (MsgBox) since Claude Code's TUI uses
-   * alternate screen buffer which overwrites any terminal output.
-   * The message box stays on top and requires user acknowledgment.
+   * Show a prominent notice after Claude Code is ready.
+   * Uses a Windows message box via PowerShell since Claude Code's TUI
+   * uses alternate screen buffer which overwrites any terminal output.
    */
   private showReadyNotice(): void {
     this.log('Showing ready notice');
     if (process.platform === 'win32') {
-      // Use PowerShell to show a message box - this pops above all windows
-      const { spawn } = require('child_process');
-      const ps = spawn('powershell', [
-        '-Command',
-        'Add-Type -AssemblyName PresentationFramework; ' +
-        '[System.Windows.MessageBox]::Show(' +
-        '"✅ 微信双向通信已就绪！\\n\\n' +
-        '📱 微信消息 → 自动注入此窗口\\n' +
-        '💬 Claude回复 → 自动推送到微信\\n\\n' +
-        '⚠️ 请关闭旧窗口，在此窗口继续对话", ' +
-        '"📱 微信双向通信", "OK", "Information")',
-      ], { detached: true, stdio: 'ignore' });
-      ps.unref();
+      try {
+        const msg = [
+          'Add-Type -AssemblyName PresentationFramework;',
+          '[System.Windows.MessageBox]::Show(',
+          '"微信双向通信已就绪！',
+          '',
+          '· 微信消息 → 自动注入此窗口',
+          '· Claude回复 → 自动推送到微信',
+          '',
+          '请手动关闭旧窗口，在此窗口继续对话",',
+          '"微信双向通信", "OK", "Information")',
+        ].join(' ');
+        const ps = spawn('powershell.exe', ['-NoProfile', '-Command', msg], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: false,
+        });
+        ps.unref();
+        this.log('PowerShell notice spawned (PID ' + (ps.pid || 'unknown') + ')');
+      } catch (e: any) {
+        this.log('Failed to show notice: ' + e.message);
+      }
     }
   }
 
