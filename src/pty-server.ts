@@ -79,11 +79,11 @@ export class PTYServer {
     if (this.running) return;
     this.running = true;
 
-    // Use --new to start a fresh session (no previous conversation context).
-    // Do NOT use --continue: it resumes the last session which may contain
-    // the /wechat command, causing Claude Code to re-execute the skill
-    // when the user types anything in the new window.
-    const args = ['--new'];
+    // Use --continue (most recent conversation) if no sessionId,
+    // or --resume <sessionId> if sessionId is provided
+    const args = this.options.sessionId
+      ? ['--resume', this.options.sessionId]
+      : ['--continue'];
     this.log(`Starting: claude ${args.join(' ')}`);
     this.log(`Working directory: ${this.options.cwd}`);
 
