@@ -98,7 +98,39 @@ async function waitForPortRelease(port: number, maxWaitMs = 5000): Promise<boole
   return false;
 }
 
+/**
+ * Kill ALL bridge.js processes on the system.
+ * This handles orphaned processes from previous sessions that aren't in state.json.
+ * Uses tasklist + wmic on Windows, pgrep on Unix.
+ */
+function killAllBridgeProcesses(): void {
+  try {
+    if (process.platform === 'win32') {
+      // Find all node processes running bridge.js
+      const output = execSync(
+        `wmic process where "CommandLine like '%bridge.js%'" get ProcessId`,
+        { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] },
+      );
+      const pids = output.split('\n')
+        .map(line => line.trim())
+        .filter(line => /^\d+$/.test(line))
+        .map(Number)
+        .filter(pid => pid !== process.pid);
+      for (const pid of pids) {
+        console.log(`Killing orphaned bridge process ${pid}`);
+        killProcess(pid);
+      }
+    } else {
+      execSync(`pkill -f 'bridge.js' || true`, { timeout: 3000, stdio: 'ignore' });
+    }
+  } catch {}
+}
+
 function stopExistingBridge(): void {
+  // 0. Kill ALL bridge processes (not just the one in state.json).
+  // Previous tests may have left orphaned bridge.js processes.
+  killAllBridgeProcesses();
+
   // 1. Kill by saved PID (fast path)
   const state = loadState();
   let killed = false;

@@ -109,19 +109,6 @@ export class PTYServer {
     this.log(`Starting: claude ${args.join(' ')}`);
     this.log(`Working directory: ${this.options.cwd}`);
 
-    // Show a very prominent banner so user can easily find THIS window
-    this.terminal.output.write('\x1b[2J\x1b[H'); // Clear screen
-    this.terminal.output.write('\x1b[1;36m');
-    this.terminal.output.write('╔══════════════════════════════════════════════════════════════╗\n');
-    this.terminal.output.write('║                                                              ║\n');
-    this.terminal.output.write('║     🔗  微信双向通信窗口  📱  WeChat Bridge  🔗              ║\n');
-    this.terminal.output.write('║                                                              ║\n');
-    this.terminal.output.write('║  ✅ 微信消息 → 自动注入到 Claude     ✅ Claude回复 → 推送到微信  ║\n');
-    this.terminal.output.write('║                                                              ║\n');
-    this.terminal.output.write('╚══════════════════════════════════════════════════════════════╝\n');
-    this.terminal.output.write('\x1b[0m');
-    this.terminal.output.write('\n');
-
     // Get terminal dimensions
     const cols = (this.terminal.output as NodeJS.WriteStream).columns || 120;
     const rows = (this.terminal.output as NodeJS.WriteStream).rows || 30;
@@ -141,8 +128,22 @@ export class PTYServer {
     writeFileSync(PTY_PID_FILE, String(this.ptyProcess.pid), 'utf-8');
 
     // Forward PTY output to user terminal + buffer for WeChat
+    let bannerShown = false;
     this.ptyProcess.onData((data) => {
-      this.lastOutputTime = Date.now();  // Track Claude activity for input lock
+      // Show banner AFTER Claude Code has started (first prompt detected)
+      // so it won't be scrolled away by Claude's startup output
+      if (!bannerShown && (data.includes('╭') || data.includes('>'))) {
+        bannerShown = true;
+        const banner = [
+          '',
+          '\x1b[1;36m╔════════════════════════════════════════════════════════════╗\x1b[0m',
+          '\x1b[1;36m║\x1b[0m  \x1b[1;33m🔗 微信双向通信窗口 📱\x1b[0m                                    \x1b[1;36m║\x1b[0m',
+          '\x1b[1;36m║\x1b[0m  ✅ 微信消息 → Claude    ✅ Claude回复 → 微信  \x1b[1;36m║\x1b[0m',
+          '\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m',
+          '',
+        ].join('\n');
+        this.terminal.output.write(banner);
+      }
       // Write directly to terminal device
       this.terminal.output.write(data);
       // Buffer for WeChat forwarding
