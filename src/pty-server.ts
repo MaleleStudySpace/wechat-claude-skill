@@ -14,7 +14,7 @@ import type { WriteStream, ReadStream } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { BridgeConfig } from './config.js';
-import type { MessageQueue, QueueItem } from './queue.js';
+import type { MessageQueue } from './queue.js';
 
 const BRIDGE_DIR = join(homedir(), '.wechat-claude-skill');
 const PTY_PID_FILE = join(BRIDGE_DIR, 'pty.pid');
@@ -71,27 +71,6 @@ export class PTYServer {
   private running = false;
   private terminal: TerminalStreams;
 
-  /**
-   * Timestamp of the last PTY output from Claude.
-   * Used to detect whether Claude is currently generating a response.
-   * If output was received within the last 2 seconds, Claude is considered "busy".
-   */
-  private lastOutputTime = 0;
-
-  /** Whether Claude Code has finished its initial startup output. */
-  private startupComplete = false;
-
-  /** Timestamp when PTY was started. */
-  private startTime = 0;
-
-  /** Interval (ms) during which Claude is considered busy after last output. */
-  private static readonly BUSY_THRESHOLD_MS = 2000;
-
-  /** Grace period (ms) after startup before input lock kicks in.
-   *  Claude Code outputs a lot during startup; we don't want to block
-   *  the first WeChat message for 10+ seconds. */
-  private static readonly STARTUP_GRACE_MS = 5000;
-
   constructor(private options: PTYServerOptions) {
     this.terminal = openTerminal();
   }
@@ -99,7 +78,6 @@ export class PTYServer {
   start(): void {
     if (this.running) return;
     this.running = true;
-    this.startTime = Date.now();
 
     // Use --continue (most recent conversation) if no sessionId,
     // or --resume <sessionId> if sessionId is provided
@@ -130,22 +108,48 @@ export class PTYServer {
     // Forward PTY output to user terminal + buffer for WeChat
     let bannerShown = false;
     this.ptyProcess.onData((data) => {
-      // Detect when Claude Code is ready (first prompt appeared)
-      if (!this.claudeReady && (data.includes('❯') || data.includes('>'))) {
+      // Detect when Claude Code is ready and idle.
+      // We look for ❯ specifically (not >) because > appears in Claude Code's
+      // startup banner (e.g. "What's new >") and causes false positives.
+      // The ❯ is Claude Code's unique input prompt marker.
+      const hasIdlePrompt = data.includes('❯');
+
+      if (!this.claudeReady && hasIdlePrompt) {
         this.claudeReady = true;
-        this.log('Claude Code is ready for input');
+        this.log('Claude Code is ready for input (❯ detected)');
       }
 
-      // Show banner AFTER Claude Code has started (first prompt detected)
-      // so it won't be scrolled away by Claude's startup output
-      if (!bannerShown && (data.includes('❯') || data.includes('>'))) {
+      // Track Claude's busy/idle state.
+      // When we inject a message, we set claudeBusy=true.
+      // When Claude finishes responding, it shows ❯ again.
+      // We must wait at least MIN_BUSY_MS (5s) after injection to avoid
+      // misinterpreting the echo "❯ <injected text>" as "Claude is idle".
+      // After the grace period, any ❯ we see is a genuine idle prompt.
+      if (this.claudeBusy && hasIdlePrompt && (Date.now() - this.lastInjectTime > PTYServer.MIN_BUSY_MS)) {
+        this.claudeBusy = false;
+        this.log('Claude is now idle, ready for next message');
+      }
+
+      // Show banner AFTER Claude Code has started (first ❯ prompt detected)
+      if (!bannerShown && hasIdlePrompt) {
         bannerShown = true;
         // Use ANSI escape to set terminal title - survives TUI redraws
         // \x1b]2;...\x07 = set window title
         this.terminal.output.write('\x1b]2;📱 微信双向通信窗口 — WeChat Bridge\x07');
-        // Also inject a visible reminder line into Claude's input
-        // This appears as the first thing Claude sees in its input
-        this.log('Banner set: window title + reminder');
+        this.log('Banner set: window title');
+
+        // Inject a startup message into Claude Code.
+        // This makes the reminder part of the conversation (not terminal output
+        // that gets overwritten by Claude Code's TUI alternate screen buffer).
+        this.claudeBusy = true;
+        this.lastInjectTime = Date.now();
+        setTimeout(() => {
+          if (this.ptyProcess) {
+            const reminder = '系统提示：微信双向通信已启动！微信发消息会自动注入此窗口，你的回复会自动推送到微信。请简短确认。';
+            this.log('Injecting startup reminder');
+            this.ptyProcess.write(reminder + '\r');
+          }
+        }, 500);
       }
       // Write directly to terminal device
       this.terminal.output.write(data);
@@ -224,53 +228,58 @@ export class PTYServer {
   }
 
   /** Whether Claude Code has finished starting and is ready for input.
-   *  Detected by seeing the first prompt marker in PTY output. */
+   *  Detected by seeing the first ❯ prompt marker in PTY output.
+   *  We only look for ❯ (not >) because > appears in Claude Code's
+   *  startup banner (e.g. "What's new >") and causes false positives. */
   private claudeReady = false;
+
+  /** Whether Claude Code is currently processing an injected message.
+   *  Set to true when we inject a message; set back to false when
+   *  we detect Claude has finished responding. */
+  private claudeBusy = false;
+
+  /** Timestamp of the last message injection. Used to enforce a minimum
+   *  busy period so the echo "❯ <injected text>" doesn't trigger
+   *  a false "idle" detection. */
+  private lastInjectTime = 0;
+
+  /** Minimum time (ms) after injection before we consider ❯ as an
+   *  "idle" signal. The echo "❯ <injected text>" appears almost instantly,
+   *  but Claude takes at least a few seconds to start and finish thinking.
+   *  After this grace period, any ❯ we see is a genuine idle prompt. */
+  private static readonly MIN_BUSY_MS = 5000;
 
   private processQueue(): void {
     if (!this.running || !this.ptyProcess || this.options.queue.isEmpty) return;
 
-    // Don't inject until Claude Code is ready (first prompt detected).
-    // Injecting during startup gets silently swallowed.
+    // Don't inject until Claude Code is ready (first ❯ prompt detected).
     if (!this.claudeReady) {
       this.log('Waiting for Claude Code to be ready before injecting...');
       return;
     }
 
-    // Inject all pending messages immediately (sorted by timestamp).
+    // Don't inject while Claude is busy processing a previous message.
+    if (this.claudeBusy) {
+      // This is normal — just wait for the next processQueue() cycle
+      return;
+    }
+
+    // Inject only ONE message at a time, then wait for Claude to finish.
+    // This prevents messages from being concatenated or lost.
     const pending = this.options.queue.dequeueAll();
     pending.sort((a, b) => a.timestamp - b.timestamp);
-    for (const item of pending) {
-      this.log(`Injecting WeChat message from ${item.from}: ${item.text}`);
-      // Windows ConPTY requires \r for Enter, Unix PTY uses \n
-      this.ptyProcess.write(item.text + '\r');
-    }
-  }
+    const item = pending[0]; // Only inject the first (oldest) message
 
-  /**
-   * Check if Claude is currently busy generating a response.
-   * Returns true if output was received within the last BUSY_THRESHOLD_MS (2 seconds).
-   * During startup grace period, always returns false so messages aren't blocked.
-   */
-  private isClaudeBusy(): boolean {
-    // Grace period: don't block during Claude Code startup
-    if (Date.now() - this.startTime < PTYServer.STARTUP_GRACE_MS) {
-      return false;
+    // Put remaining messages back at the front of the queue
+    if (pending.length > 1) {
+      this.options.queue.requeue(pending.slice(1));
     }
-    return Date.now() - this.lastOutputTime < PTYServer.BUSY_THRESHOLD_MS;
-  }
 
-  /**
-   * Display a WeChat message notification in the terminal with color-coded format.
-   * This is shown while waiting for Claude to become idle.
-   * Format: [微信 HH:MM:SS] sender: message
-   * Colors: cyan for timestamp prefix, yellow for sender name.
-   */
-  private showWeChatNotification(item: QueueItem): void {
-    const time = new Date(item.timestamp).toLocaleTimeString('zh-CN', { hour12: false });
-    // ANSI escape codes: \x1b[36m = cyan, \x1b[33m = yellow, \x1b[0m = reset
-    const prefix = `\x1b[36m[微信 ${time}]\x1b[0m \x1b[33m${item.from}\x1b[0m: `;
-    this.terminal.output.write(prefix + item.text + '\n');
+    this.log(`Injecting WeChat message from ${item.from}: ${item.text}`);
+    this.claudeBusy = true;
+    this.lastInjectTime = Date.now();
+    // Windows ConPTY requires \r for Enter, Unix PTY uses \n
+    this.ptyProcess.write(item.text + '\r');
   }
 
   private log(msg: string): void {

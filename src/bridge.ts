@@ -153,9 +153,18 @@ async function main() {
     // Signal readiness to parent process (via stdout pipe)
     process.stdout.write(`BRIDGE_READY:${process.pid}\n`);
 
-    // Save PID
+    // Save PID and state (so hook-handler can detect CLI mode)
     mkdirSync(BRIDGE_DIR, { recursive: true });
     writeFileSync(join(BRIDGE_DIR, 'bridge.pid'), String(process.pid), 'utf-8');
+    // Write state.json for hook-handler's isCliModeActive() check
+    writeFileSync(join(BRIDGE_DIR, 'state.json'), JSON.stringify({
+      mode,
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      sessionId: sessionId || undefined,
+      cwd,
+    }, null, 2) + '\n', 'utf-8');
+    log(`State saved: mode=${mode}, pid=${process.pid}`);
   });
 
   // Start WeChat message polling

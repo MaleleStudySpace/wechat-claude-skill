@@ -32,12 +32,18 @@ export class MessageQueue {
     return this.items[0];
   }
 
-  /** Dequeue all items and clear the seen set. Returns items in FIFO order. */
+  /** Dequeue all items. Returns items in FIFO order. Does NOT clear seen set
+   *  so that requeued items won't be re-enqueued by duplicate messages. */
   dequeueAll(): QueueItem[] {
     const items = this.items;
     this.items = [];
-    this.seen.clear();
     return items;
+  }
+
+  /** Re-add items to the front of the queue (preserves FIFO order).
+   *  Used when only the first item was consumed and the rest need to wait. */
+  requeue(items: QueueItem[]): void {
+    this.items = [...items, ...this.items];
   }
 
   get length(): number {

@@ -31,7 +31,7 @@
  *   hook-handler 检测到 CLI 模式后直接退出，避免同一条回复被发送两次。
  */
 
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -41,7 +41,6 @@ import type { BridgeConfig } from './config.js';
 
 const LOG_FILE = join(homedir(), '.wechat-claude-skill', 'hook-handler.log');
 const BRIDGE_DIR = join(homedir(), '.wechat-claude-skill');
-const STATE_FILE = join(BRIDGE_DIR, 'state.json');
 const MAX_MESSAGE_LENGTH = 4000;
 
 function debugLog(msg: string): void {
@@ -63,12 +62,9 @@ async function main(): Promise<void> {
   // Log immediately — proves the hook was triggered
   debugLog('=== Hook triggered ===');
 
-  // Check if CLI mode is active — if so, bridge handles message forwarding via PTY,
-  // and hook-handler should exit early to avoid sending the same message twice.
-  if (isCliModeActive()) {
-    debugLog('CLI mode active, skipping hook (bridge handles messages via PTY)');
-    process.exit(0);
-  }
+  // CLI mode also uses this hook to send Claude's clean last_assistant_message.
+  // PTY output contains TUI redraws/spinners/ANSI escapes, so bridge does NOT
+  // forward raw PTY output to WeChat. Do not skip when CLI bridge is active.
 
   // Read hook input from stdin
   const inputStr = await readStdin();
@@ -125,32 +121,6 @@ async function main(): Promise<void> {
   }
 
   process.exit(0);
-}
-
-/**
- * Check if CLI mode bridge is currently active.
- * In CLI mode, bridge handles message forwarding via PTY output capture,
- * so hook-handler should not send the same message again.
- */
-function isCliModeActive(): boolean {
-  try {
-    if (!existsSync(STATE_FILE)) return false;
-    const state = JSON.parse(readFileSync(STATE_FILE, 'utf-8'));
-    if (state.mode !== 'cli') return false;
-    // Verify the bridge process is still running
-    if (state.pid) {
-      try {
-        process.kill(state.pid, 0);
-        return true;
-      } catch {
-        // Process not running — state file is stale
-        return false;
-      }
-    }
-    return false;
-  } catch {
-    return false;
-  }
 }
 
 main();
