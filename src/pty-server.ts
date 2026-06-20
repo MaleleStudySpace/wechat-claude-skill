@@ -109,11 +109,18 @@ export class PTYServer {
     this.log(`Starting: claude ${args.join(' ')}`);
     this.log(`Working directory: ${this.options.cwd}`);
 
-    this.terminal.output.write('\x1b[36m========================================\x1b[0m\n');
-    this.terminal.output.write('\x1b[36m  Claude Code - 微信双向通信新窗口\x1b[0m\n');
-    this.terminal.output.write('\x1b[36m========================================\x1b[0m\n');
-    this.terminal.output.write('这个窗口用于继续 Claude Code 对话，并接收微信消息。\n');
-    this.terminal.output.write('微信消息会显示为 [微信 HH:MM:SS]，并自动发送给 Claude。\n\n');
+    // Show a very prominent banner so user can easily find THIS window
+    this.terminal.output.write('\x1b[2J\x1b[H'); // Clear screen
+    this.terminal.output.write('\x1b[1;36m');
+    this.terminal.output.write('╔══════════════════════════════════════════════════════════════╗\n');
+    this.terminal.output.write('║                                                              ║\n');
+    this.terminal.output.write('║     🔗  微信双向通信窗口  📱  WeChat Bridge  🔗              ║\n');
+    this.terminal.output.write('║                                                              ║\n');
+    this.terminal.output.write('║  ✅ 微信消息 → 自动注入到 Claude     ✅ Claude回复 → 推送到微信  ║\n');
+    this.terminal.output.write('║                                                              ║\n');
+    this.terminal.output.write('╚══════════════════════════════════════════════════════════════╝\n');
+    this.terminal.output.write('\x1b[0m');
+    this.terminal.output.write('\n');
 
     // Get terminal dimensions
     const cols = (this.terminal.output as NodeJS.WriteStream).columns || 120;
@@ -215,17 +222,11 @@ export class PTYServer {
   private processQueue(): void {
     if (!this.running || !this.ptyProcess || this.options.queue.isEmpty) return;
 
-    if (this.isClaudeBusy()) {
-      // Claude is busy (generating response): show notification but don't inject yet
-      const item = this.options.queue.peek();
-      if (item && !item.notified) {
-        this.showWeChatNotification(item);
-        item.notified = true;
-      }
-      return;
-    }
-
-    // Claude is idle: inject all pending messages (sorted by timestamp)
+    // Inject all pending messages immediately (sorted by timestamp).
+    // We don't use an input lock because Claude Code's terminal UI
+    // continuously emits output (cursor blinking, prompt refresh),
+    // making "2 seconds since last output" unreliable for detecting idle state.
+    // PTY handles input/output interleaving natively.
     const pending = this.options.queue.dequeueAll();
     pending.sort((a, b) => a.timestamp - b.timestamp);
     for (const item of pending) {
