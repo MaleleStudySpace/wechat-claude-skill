@@ -130,19 +130,22 @@ export class PTYServer {
     // Forward PTY output to user terminal + buffer for WeChat
     let bannerShown = false;
     this.ptyProcess.onData((data) => {
+      // Detect when Claude Code is ready (first prompt appeared)
+      if (!this.claudeReady && (data.includes('❯') || data.includes('>'))) {
+        this.claudeReady = true;
+        this.log('Claude Code is ready for input');
+      }
+
       // Show banner AFTER Claude Code has started (first prompt detected)
       // so it won't be scrolled away by Claude's startup output
-      if (!bannerShown && (data.includes('╭') || data.includes('>'))) {
+      if (!bannerShown && (data.includes('❯') || data.includes('>'))) {
         bannerShown = true;
-        const banner = [
-          '',
-          '\x1b[1;36m╔════════════════════════════════════════════════════════════╗\x1b[0m',
-          '\x1b[1;36m║\x1b[0m  \x1b[1;33m🔗 微信双向通信窗口 📱\x1b[0m                                    \x1b[1;36m║\x1b[0m',
-          '\x1b[1;36m║\x1b[0m  ✅ 微信消息 → Claude    ✅ Claude回复 → 微信  \x1b[1;36m║\x1b[0m',
-          '\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m',
-          '',
-        ].join('\n');
-        this.terminal.output.write(banner);
+        // Use ANSI escape to set terminal title - survives TUI redraws
+        // \x1b]2;...\x07 = set window title
+        this.terminal.output.write('\x1b]2;📱 微信双向通信窗口 — WeChat Bridge\x07');
+        // Also inject a visible reminder line into Claude's input
+        // This appears as the first thing Claude sees in its input
+        this.log('Banner set: window title + reminder');
       }
       // Write directly to terminal device
       this.terminal.output.write(data);
@@ -220,14 +223,21 @@ export class PTYServer {
     this.outputBuffer = '';
   }
 
+  /** Whether Claude Code has finished starting and is ready for input.
+   *  Detected by seeing the first prompt marker in PTY output. */
+  private claudeReady = false;
+
   private processQueue(): void {
     if (!this.running || !this.ptyProcess || this.options.queue.isEmpty) return;
 
+    // Don't inject until Claude Code is ready (first prompt detected).
+    // Injecting during startup gets silently swallowed.
+    if (!this.claudeReady) {
+      this.log('Waiting for Claude Code to be ready before injecting...');
+      return;
+    }
+
     // Inject all pending messages immediately (sorted by timestamp).
-    // We don't use an input lock because Claude Code's terminal UI
-    // continuously emits output (cursor blinking, prompt refresh),
-    // making "2 seconds since last output" unreliable for detecting idle state.
-    // PTY handles input/output interleaving natively.
     const pending = this.options.queue.dequeueAll();
     pending.sort((a, b) => a.timestamp - b.timestamp);
     for (const item of pending) {

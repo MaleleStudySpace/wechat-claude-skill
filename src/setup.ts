@@ -406,6 +406,21 @@ async function startBridgeInNewTerminal(mode: 'cli' | 'vscode', sessionId?: stri
   const launcherContent = `
 const { spawn } = require('child_process');
 const path = require('path');
+
+// Set CMD window title - this survives Claude Code TUI redraws
+process.stdout.write('\\x1b]2;\\x1b[5m\\x1b[1;33m [WECHAT BRIDGE] \\x1b[0m\\x07');
+
+// Print prominent banner BEFORE starting bridge
+console.log('');
+console.log('\\x1b[1;36m' + '='.repeat(64) + '\\x1b[0m');
+console.log('\\x1b[1;33m    📱  微 信 双 向 通 信 窗 口  🔗\\x1b[0m');
+console.log('\\x1b[1;32m    ✅ 微信消息 → 自动注入 Claude\\x1b[0m');
+console.log('\\x1b[1;32m    ✅ Claude回复 → 自动推送到微信\\x1b[0m');
+console.log('\\x1b[1;36m' + '='.repeat(64) + '\\x1b[0m');
+console.log('');
+console.log('正在启动 Claude Code...');
+console.log('');
+
 const bridgePath = ${JSON.stringify(bridgePath)};
 const args = [bridgePath, '--mode', '${mode}'${sessionId && mode === 'vscode' ? `, '--session', '${sessionId}'` : ''}, '--cwd', process.cwd()];
 const child = spawn(process.execPath, args, { stdio: 'inherit' });
