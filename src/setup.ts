@@ -313,9 +313,6 @@ async function runBridgeDirectly(mode: 'cli' | 'vscode', sessionId?: string): Pr
 async function setupCli(): Promise<void> {
   console.log('Starting WeChat binding (CLI mode)...\n');
 
-  stopExistingBridge();
-  await ensureAccount();  // Auto-login if needed
-
   // Session ID can come from:
   // 1. CLI argument: wechat-claude-skill cli <sessionId>
   // 2. Environment variable: $CLAUDE_SESSION_ID (set by Claude Code)
@@ -326,11 +323,13 @@ async function setupCli(): Promise<void> {
     console.log('   Usage: wechat-claude-skill cli <sessionId>');
     console.log('   Or run from Claude Code skill (auto-provides $CLAUDE_SESSION_ID)');
     console.log('');
-    console.log('   Falling back to VSCode mode (one-way notify)...\n');
-    writeHookConfig();
-    console.log('✅ 微信通知已启动 (VSCode 模式 - fallback)');
-    return;
+    console.log('   Aborting (use /wechat vscode for VSCode mode)\n');
+    process.exit(1);
   }
+
+  // Only stop existing bridge if we have a valid session (going to run CLI mode)
+  stopExistingBridge();
+  await ensureAccount();  // Auto-login if needed
 
   writeHookConfig();
 
