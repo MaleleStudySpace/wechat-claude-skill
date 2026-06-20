@@ -14,7 +14,7 @@ import type { WriteStream, ReadStream } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { BridgeConfig } from './config.js';
-import type { MessageQueue } from './queue.js';
+import type { MessageQueue, QueueItem } from './queue.js';
 
 const BRIDGE_DIR = join(homedir(), '.wechat-claude-skill');
 const PTY_PID_FILE = join(BRIDGE_DIR, 'pty.pid');
@@ -67,6 +67,16 @@ export class PTYServer {
   private running = false;
   private terminal: TerminalStreams;
 
+  /**
+   * Timestamp of the last PTY output from Claude.
+   * Used to detect whether Claude is currently generating a response.
+   * If output was received within the last 2 seconds, Claude is considered "busy".
+   */
+  private lastOutputTime = 0;
+
+  /** Interval (ms) during which Claude is considered busy after last output. */
+  private static readonly BUSY_THRESHOLD_MS = 2000;
+
   constructor(private options: PTYServerOptions) {
     this.terminal = openTerminal();
   }
@@ -99,6 +109,7 @@ export class PTYServer {
 
     // Forward PTY output to user terminal + buffer for WeChat
     this.ptyProcess.onData((data) => {
+      this.lastOutputTime = Date.now();  // Track Claude activity for input lock
       // Write directly to terminal device
       this.terminal.output.write(data);
       // Buffer for WeChat forwarding
@@ -167,12 +178,45 @@ export class PTYServer {
 
   private processQueue(): void {
     if (!this.running || !this.ptyProcess || this.options.queue.isEmpty) return;
-    const item = this.options.queue.dequeue();
-    if (!item) return;
 
-    this.log(`Injecting WeChat message from ${item.from}: ${item.text}`);
-    // Write to PTY stdin as if user typed it
-    this.ptyProcess.write(item.text + '\n');
+    if (this.isClaudeBusy()) {
+      // Claude is busy (generating response): show notification but don't inject yet
+      const item = this.options.queue.peek();
+      if (item && !item.notified) {
+        this.showWeChatNotification(item);
+        item.notified = true;
+      }
+      return;
+    }
+
+    // Claude is idle: inject all pending messages (sorted by timestamp)
+    const pending = this.options.queue.dequeueAll();
+    pending.sort((a, b) => a.timestamp - b.timestamp);
+    for (const item of pending) {
+      this.log(`Injecting WeChat message from ${item.from}: ${item.text}`);
+      this.ptyProcess.write(item.text + '\n');
+    }
+  }
+
+  /**
+   * Check if Claude is currently busy generating a response.
+   * Returns true if output was received within the last BUSY_THRESHOLD_MS (2 seconds).
+   */
+  private isClaudeBusy(): boolean {
+    return Date.now() - this.lastOutputTime < PTYServer.BUSY_THRESHOLD_MS;
+  }
+
+  /**
+   * Display a WeChat message notification in the terminal with color-coded format.
+   * This is shown while waiting for Claude to become idle.
+   * Format: [微信 HH:MM:SS] sender: message
+   * Colors: cyan for timestamp prefix, yellow for sender name.
+   */
+  private showWeChatNotification(item: QueueItem): void {
+    const time = new Date(item.timestamp).toLocaleTimeString('zh-CN', { hour12: false });
+    // ANSI escape codes: \x1b[36m = cyan, \x1b[33m = yellow, \x1b[0m = reset
+    const prefix = `\x1b[36m[微信 ${time}]\x1b[0m \x1b[33m${item.from}\x1b[0m: `;
+    this.terminal.output.write(prefix + item.text + '\n');
   }
 
   private log(msg: string): void {

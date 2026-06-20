@@ -67,7 +67,9 @@ function formatForWeChat(message: string): string {
 
 // Format WeChat message for Claude injection (CLI mode)
 function formatForClaude(msg: WeChatMessage): string {
-  return `[微信消息 from ${msg.fromNickname || msg.fromUserId}]：${msg.text}`;
+  const time = new Date(msg.createTime || Date.now())
+    .toLocaleTimeString('zh-CN', { hour12: false });
+  return `[微信消息 ${time} from ${msg.fromNickname || msg.fromUserId}]：${msg.text}`;
 }
 
 async function main() {
@@ -167,7 +169,7 @@ async function main() {
         const enqueued = queue.enqueue({
           msgId: msg.msgId,
           from: msg.fromNickname || msg.fromUserId,
-          text: msg.text,
+          text: formatForClaude(msg),
           timestamp: msg.createTime || Date.now(),
         });
 

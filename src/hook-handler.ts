@@ -6,7 +6,7 @@
  *
  * Works for both VSCode and CLI modes:
  * - VSCode: one-way notification (Claude → WeChat)
- * - CLI: one-way notification here; bridge handles WeChat → Claude via PTY
+ * - CLI: hook-handler detects CLI mode and exits early (bridge handles messages via PTY)
  *
  * Exit 0: normal exit, Claude stays stopped (ready for next user input)
  *
@@ -23,9 +23,15 @@
  * 4. 微信二维码只有约 1 分钟有效期，过期需重新生成。
  *
  * 5. curl 发送中文会乱码（Windows 终端编码问题），Node.js fetch 默认 UTF-8 正常。
+ *
+ * ## hook-handler 与 bridge 的关系
+ *
+ * - VSCode 模式：hook-handler 直接发送消息到微信（bridge 仅做后台轮询）
+ * - CLI 模式：bridge 通过 PTY 输出捕获 Claude 回复并发送到微信，
+ *   hook-handler 检测到 CLI 模式后直接退出，避免同一条回复被发送两次。
  */
 
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -34,6 +40,8 @@ import { sendMessage } from './wechat.js';
 import type { BridgeConfig } from './config.js';
 
 const LOG_FILE = join(homedir(), '.wechat-claude-skill', 'hook-handler.log');
+const BRIDGE_DIR = join(homedir(), '.wechat-claude-skill');
+const STATE_FILE = join(BRIDGE_DIR, 'state.json');
 const MAX_MESSAGE_LENGTH = 4000;
 
 function debugLog(msg: string): void {
@@ -54,6 +62,13 @@ async function readStdin(): Promise<string> {
 async function main(): Promise<void> {
   // Log immediately — proves the hook was triggered
   debugLog('=== Hook triggered ===');
+
+  // Check if CLI mode is active — if so, bridge handles message forwarding via PTY,
+  // and hook-handler should exit early to avoid sending the same message twice.
+  if (isCliModeActive()) {
+    debugLog('CLI mode active, skipping hook (bridge handles messages via PTY)');
+    process.exit(0);
+  }
 
   // Read hook input from stdin
   const inputStr = await readStdin();
@@ -89,52 +104,19 @@ async function main(): Promise<void> {
     pollInterval: 3000,
   };
 
-  // Try getUpdates first — two purposes:
-  // 1. Fetch a real context_token from any prior user message (opportunistic).
-  //    context_token is NOT required (empty/fake values also work), but a real
-  //    one from getUpdates is the "cleanest" parameter to pass.
-  // 2. The getUpdates call itself does NOT activate the Bot — the only thing
-  //    that activates a newly-bound Bot is the user sending a message first.
-  //    If this is a new account with no user messages yet, sendMessage will
-  //    likely return ret:-2 and the message won't be delivered.
-  let contextToken = '';
-  const API_BASE = account.baseUrl || 'https://ilinkai.weixin.qq.com';
-  const randBuf = new Uint8Array(4);
-  crypto.getRandomValues(randBuf);
-  const uin = Buffer.from(randBuf).toString('base64');
-  try {
-    const pollRes = await fetch(`${API_BASE}/ilink/bot/getupdates`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${account.botToken}`,
-        'AuthorizationType': 'ilink_bot_token',
-        'X-WECHAT-UIN': uin,
-      },
-      body: JSON.stringify({}),
-    });
-    const pollData = await pollRes.json();
-    // Extract context_token from the latest user message, if any
-    const msgs = pollData.msgs || [];
-    for (const msg of msgs) {
-      if (msg.context_token) {
-        contextToken = msg.context_token;
-        break;
-      }
-    }
-    debugLog(`getUpdates: ret=${pollData.ret} errcode=${pollData.errcode} msgs=${msgs.length} ctx=${contextToken ? 'YES' : 'NO'}`);
-  } catch (e: any) {
-    debugLog(`getUpdates failed (non-fatal): ${e.message}`);
-  }
-
   // Truncate if too long
   const text = message.length > MAX_MESSAGE_LENGTH
     ? message.slice(0, MAX_MESSAGE_LENGTH) + '\n\n... (消息过长，已截断)'
     : message;
 
-  // Send to WeChat — context_token is optional (see file header comment #2)
+  // Send to WeChat — context_token is NOT required (see file header comment #2).
+  // Previously we called getUpdates here to fetch context_token, but:
+  // 1. context_token is optional (empty/fake values also work)
+  // 2. getUpdates without sync_buf may conflict with bridge's polling
+  // 3. getUpdates long-poll (30s) risks exceeding the hook timeout (60s)
+  // So we simply send without context_token.
   debugLog('Sending to WeChat...');
-  const result = await sendMessage(config, account.userId, text, contextToken || undefined);
+  const result = await sendMessage(config, account.userId, text);
 
   if (result.success) {
     debugLog(`Sent successfully (msgId: ${result.msgId || 'unknown'})`);
@@ -143,6 +125,32 @@ async function main(): Promise<void> {
   }
 
   process.exit(0);
+}
+
+/**
+ * Check if CLI mode bridge is currently active.
+ * In CLI mode, bridge handles message forwarding via PTY output capture,
+ * so hook-handler should not send the same message again.
+ */
+function isCliModeActive(): boolean {
+  try {
+    if (!existsSync(STATE_FILE)) return false;
+    const state = JSON.parse(readFileSync(STATE_FILE, 'utf-8'));
+    if (state.mode !== 'cli') return false;
+    // Verify the bridge process is still running
+    if (state.pid) {
+      try {
+        process.kill(state.pid, 0);
+        return true;
+      } catch {
+        // Process not running — state file is stale
+        return false;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 main();

@@ -17,6 +17,7 @@ import { BRIDGE_DIR } from './config.js';
 
 const BRIDGE_PID_FILE = join(BRIDGE_DIR, 'bridge.pid');
 const STATE_FILE = join(BRIDGE_DIR, 'state.json');
+const BRIDGE_PORT = 3456;
 // Use forward slashes for cross-platform compatibility (exec form args)
 const HOOK_HANDLER_PATH = join(import.meta.dirname, 'hook-handler.js').replace(/\\/g, '/');
 
@@ -66,45 +67,83 @@ function killProcess(pid: number): void {
   } catch {}
 }
 
-/** Find and kill ALL wechat-claude-skill bridge/setup zombie processes. */
-function killAllZombieProcesses(): void {
-  if (process.platform !== 'win32') return;
+/**
+ * Check if a port is in use (indicating a bridge is running).
+ * More reliable than wmic process matching.
+ */
+function isPortInUse(port: number): boolean {
   try {
-    // Find all node processes running our bridge.js or setup.js
     const output = execSync(
-      'wmic process where "Name=\'node.exe\'" get ProcessId,CommandLine /format:csv',
-      { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] },
+      process.platform === 'win32'
+        ? `netstat -ano | findstr :${port} | findstr LISTENING`
+        : `lsof -i :${port}`,
+      { encoding: 'utf-8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] },
     );
-    const myDir = import.meta.dirname.replace(/\\/g, '\\\\');
-    for (const line of output.split('\n')) {
-      if (!line.includes('bridge.js') && !line.includes('setup.js')) continue;
-      if (!line.includes('.wechat-claude-skill')) continue;
-      const match = line.match(/,(\d+)\s*$/);
-      if (match) {
-        const pid = parseInt(match[1], 10);
-        if (pid !== process.pid) {
-          killProcess(pid);
-        }
-      }
-    }
-  } catch {}
+    return output.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Wait for a port to be released (max 5 seconds).
+ * Returns true if port is free, false if timeout.
+ */
+async function waitForPortRelease(port: number, maxWaitMs = 5000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    if (!isPortInUse(port)) return true;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return false;
 }
 
 function stopExistingBridge(): void {
   // 1. Kill by saved PID (fast path)
   const state = loadState();
+  let killed = false;
   if (state && isBridgeRunning(state.pid)) {
     console.log(`Stopping existing bridge (PID ${state.pid})...`);
     killProcess(state.pid);
-    const start = Date.now();
-    while (Date.now() - start < 3000) {
-      if (!isBridgeRunning(state.pid)) break;
+    killed = true;
+  }
+
+  // 2. If port is still in use, try to kill any process using it
+  if (isPortInUse(BRIDGE_PORT)) {
+    console.log(`Port ${BRIDGE_PORT} still in use, forcing cleanup...`);
+    try {
+      // Find and kill process using the port
+      if (process.platform === 'win32') {
+        const output = execSync(
+          `netstat -ano | findstr :${BRIDGE_PORT} | findstr LISTENING`,
+          { encoding: 'utf-8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] },
+        );
+        const lines = output.trim().split('\n');
+        for (const line of lines) {
+          const match = line.trim().match(/(\d+)\s*$/);
+          if (match) {
+            const pid = parseInt(match[1], 10);
+            if (pid && pid !== process.pid) {
+              console.log(`Killing process ${pid} using port ${BRIDGE_PORT}`);
+              killProcess(pid);
+              killed = true;
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // 3. Wait for port to be released
+  if (killed) {
+    console.log('Waiting for port to be released...');
+    const released = waitForPortRelease(BRIDGE_PORT, 5000);
+    if (!released) {
+      console.warn('Warning: Port not released, will retry anyway');
     }
   }
 
-  // 2. Kill any zombie bridge/setup processes (belt and suspenders)
-  killAllZombieProcesses();
-
+  // 4. Clean up state files
   try { unlinkSync(BRIDGE_PID_FILE); } catch {}
   try { unlinkSync(STATE_FILE); } catch {}
 }
@@ -199,7 +238,8 @@ function removeHookConfig(): void {
  * Pipes are destroyed after readiness so the parent process can exit cleanly.
  */
 function startBridgeDetached(mode: 'cli' | 'vscode', sessionId?: string): Promise<void> {
-  const bridgePath = join(import.meta.dirname, 'bridge.js');
+  // Use dist/bridge.js (compiled) instead of src/bridge.ts (source)
+  const bridgePath = join(import.meta.dirname, '..', 'dist', 'bridge.js');
   const args = [bridgePath, '--mode', mode];
   if (sessionId) args.push('--session', sessionId);
   args.push('--cwd', process.cwd());
@@ -263,8 +303,8 @@ async function runBridgeDirectly(mode: 'cli' | 'vscode', sessionId?: string): Pr
   if (sessionId) process.argv.push('--session', sessionId);
   process.argv.push('--cwd', process.cwd());
 
-  // Import and run bridge (use file:// URL for Windows)
-  const bridgePath = join(import.meta.dirname, 'bridge.js');
+  // Import and run bridge (use compiled dist/bridge.js)
+  const bridgePath = join(import.meta.dirname, '..', 'dist', 'bridge.js');
   const bridgeUrl = `file:///${bridgePath.replace(/\\/g, '/')}`;
   await import(bridgeUrl);
 }
@@ -443,8 +483,17 @@ function uninstallSkill(): void {
 }
 
 // --- Main ---
-// Kill zombie processes on every invocation
-killAllZombieProcesses();
+// Clean up stale bridge processes on every invocation
+// (e.g. if bridge died without cleaning up state.json)
+const staleState = loadState();
+if (staleState && isBridgeRunning(staleState.pid)) {
+  // A previous bridge is still running — check if port is actually in use
+  if (!isPortInUse(BRIDGE_PORT)) {
+    // PID is alive but not listening on our port — stale state file
+    try { unlinkSync(STATE_FILE); } catch {}
+    try { unlinkSync(BRIDGE_PID_FILE); } catch {}
+  }
+}
 
 const action = process.argv[2];
 switch (action) {

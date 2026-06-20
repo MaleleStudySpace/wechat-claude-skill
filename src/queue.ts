@@ -9,6 +9,8 @@ export interface QueueItem {
   from: string;
   text: string;
   timestamp: number;
+  /** Whether this item has been shown in terminal as notification (while waiting for Claude to be idle) */
+  notified?: boolean;
 }
 
 export class MessageQueue {
@@ -28,6 +30,14 @@ export class MessageQueue {
 
   peek(): QueueItem | undefined {
     return this.items[0];
+  }
+
+  /** Dequeue all items and clear the seen set. Returns items in FIFO order. */
+  dequeueAll(): QueueItem[] {
+    const items = this.items;
+    this.items = [];
+    this.seen.clear();
+    return items;
   }
 
   get length(): number {
