@@ -363,34 +363,31 @@ async function setupCli(): Promise<void> {
 
 /**
  * Start bridge in a new terminal window (visible PTY).
- * Creates a .bat launcher file and opens it with `start`.
- * This avoids Windows `start` command quoting issues.
+ * Uses a Node.js launcher script to avoid Windows .bat encoding issues
+ * with Chinese characters in paths.
  */
 async function startBridgeInNewTerminal(mode: 'cli' | 'vscode', sessionId?: string): Promise<void> {
   const bridgePath = join(import.meta.dirname, '..', 'dist', 'bridge.js');
-  const args = [bridgePath, '--mode', mode];
-  if (sessionId && mode === 'vscode') {
-    args.push('--session', sessionId);
-  }
-  args.push('--cwd', process.cwd());
 
-  // Write a .bat launcher to avoid Windows `start` quoting issues
-  const batPath = join(BRIDGE_DIR, 'cli-launcher.bat');
-  const nodeCmd = `node "${bridgePath}" --mode ${mode}${sessionId && mode === 'vscode' ? ` --session "${sessionId}"` : ''} --cwd "${process.cwd()}"`;
-  const batContent = `@echo off
-title Claude Code - WeChat Bridge
-echo 正在启动微信双向通信...
-echo.
-${nodeCmd}
-echo.
-echo 会话已结束，按任意键退出...
-pause >nul
+  // Write a Node.js launcher script (avoids .bat encoding issues)
+  const launcherPath = join(BRIDGE_DIR, 'cli-launcher.js');
+  const launcherContent = `
+const { spawn } = require('child_process');
+const path = require('path');
+const bridgePath = ${JSON.stringify(bridgePath)};
+const args = [bridgePath, '--mode', '${mode}'${sessionId && mode === 'vscode' ? `, '--session', '${sessionId}'` : ''}, '--cwd', process.cwd()];
+const child = spawn(process.execPath, args, { stdio: 'inherit' });
+child.on('exit', (code) => {
+  console.log('\\n会话已结束，按 Ctrl+C 退出');
+  process.exit(code || 0);
+});
+process.on('SIGINT', () => { child.kill(); process.exit(0); });
 `;
   mkdirSync(BRIDGE_DIR, { recursive: true });
-  writeFileSync(batPath, batContent, 'utf-8');
+  writeFileSync(launcherPath, launcherContent, 'utf-8');
 
-  // Open the .bat file in a new CMD window
-  spawn('cmd', ['/c', 'start', batPath], {
+  // Open new CMD window running the launcher
+  spawn('cmd', ['/c', 'start', 'cmd', '/K', process.execPath, launcherPath], {
     detached: true,
     stdio: 'ignore',
     shell: false,
