@@ -171,11 +171,16 @@ async function main() {
 
   // Start WeChat message polling
   let consecutivePollErrors = 0;
-  const MAX_CONSECUTIVE_ERRORS = 10;  // After 10 consecutive failures, assume token is invalid
+  let tokenInvalidNotified = false;
+  const MAX_CONSECUTIVE_ERRORS = 5;  // After 5 consecutive failures, assume token is invalid
   const poller = startMessagePolling(
     config,
     (messages: WeChatMessage[]) => {
       consecutivePollErrors = 0;  // Reset on success
+      if (tokenInvalidNotified) {
+        log('Poll recovered — token is valid again');
+        tokenInvalidNotified = false;
+      }
       log(`Received ${messages.length} messages from polling`);
       for (const msg of messages) {
         log(`  msg: isSystem=${msg.isSystem} isBot=${msg.isBot} text=${msg.text?.slice(0, 50)}`);
@@ -198,14 +203,29 @@ async function main() {
     (error) => {
       consecutivePollErrors++;
       logError(`Poll error (${consecutivePollErrors}/${MAX_CONSECUTIVE_ERRORS}): ${error.message}`);
-      if (consecutivePollErrors >= MAX_CONSECUTIVE_ERRORS) {
-        logError('Too many consecutive poll failures — token may be invalid (another device may have bound this WeChat). Shutting down.');
-        shutdown();
+      if (consecutivePollErrors >= MAX_CONSECUTIVE_ERRORS && !tokenInvalidNotified) {
+        tokenInvalidNotified = true;
+        const msg = '\n\n⚠️ 微信连接失败（连续 ' + MAX_CONSECUTIVE_ERRORS + ' 次错误）\n' +
+          '可能原因：同一微信在另一台电脑上进行了绑定，导致当前 token 失效。\n' +
+          '请在 Claude Code 中执行 /wechat 重新绑定微信。\n';
+        // Show in terminal (if CLI mode with PTY)
+        if (mode === 'cli') {
+          try { process.stdout.write(msg); } catch {}
+        }
+        logError('Token may be invalid — another device may have bound this WeChat. User should run /wechat to re-bind.');
       }
     },
     () => {
-      logError('Session expired — this WeChat Bot token is no longer valid. Another device may have bound this WeChat. Shutting down.');
-      shutdown();
+      if (!tokenInvalidNotified) {
+        tokenInvalidNotified = true;
+        const msg = '\n\n⚠️ 微信会话已过期\n' +
+          '可能原因：同一微信在另一台电脑上进行了绑定。\n' +
+          '请在 Claude Code 中执行 /wechat 重新绑定微信。\n';
+        if (mode === 'cli') {
+          try { process.stdout.write(msg); } catch {}
+        }
+        logError('Session expired — another device may have bound this WeChat. User should run /wechat to re-bind.');
+      }
     },
   );
 
