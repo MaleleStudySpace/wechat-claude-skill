@@ -170,9 +170,12 @@ async function main() {
   });
 
   // Start WeChat message polling
+  let consecutivePollErrors = 0;
+  const MAX_CONSECUTIVE_ERRORS = 10;  // After 10 consecutive failures, assume token is invalid
   const poller = startMessagePolling(
     config,
     (messages: WeChatMessage[]) => {
+      consecutivePollErrors = 0;  // Reset on success
       log(`Received ${messages.length} messages from polling`);
       for (const msg of messages) {
         log(`  msg: isSystem=${msg.isSystem} isBot=${msg.isBot} text=${msg.text?.slice(0, 50)}`);
@@ -193,7 +196,16 @@ async function main() {
       }
     },
     (error) => {
-      logError(`Poll error: ${error.message}`);
+      consecutivePollErrors++;
+      logError(`Poll error (${consecutivePollErrors}/${MAX_CONSECUTIVE_ERRORS}): ${error.message}`);
+      if (consecutivePollErrors >= MAX_CONSECUTIVE_ERRORS) {
+        logError('Too many consecutive poll failures — token may be invalid (another device may have bound this WeChat). Shutting down.');
+        shutdown();
+      }
+    },
+    () => {
+      logError('Session expired — this WeChat Bot token is no longer valid. Another device may have bound this WeChat. Shutting down.');
+      shutdown();
     },
   );
 
