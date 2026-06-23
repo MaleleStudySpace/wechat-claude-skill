@@ -99,52 +99,20 @@ async function waitForPortRelease(port: number, maxWaitMs = 5000): Promise<boole
 }
 
 /**
- * Kill ALL bridge.js processes on the system.
- * This handles orphaned processes from previous sessions that aren't in state.json.
- * Uses tasklist + wmic on Windows, pgrep on Unix.
+ * Kill ALL bridge processes.
+ * Uses port detection + saved PID — no wmic (unreliable, dangerous, deprecated on new Windows).
  */
 function killAllBridgeProcesses(): void {
-  try {
-    if (process.platform === 'win32') {
-      // Find all node processes running bridge.js
-      const output = execSync(
-        `wmic process where "CommandLine like '%bridge.js%'" get ProcessId`,
-        { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] },
-      );
-      const pids = output.split('\n')
-        .map(line => line.trim())
-        .filter(line => /^\d+$/.test(line))
-        .map(Number)
-        .filter(pid => pid !== process.pid);
-      for (const pid of pids) {
-        console.log(`Killing orphaned bridge process ${pid}`);
-        killProcess(pid);
-      }
-    } else {
-      execSync(`pkill -f 'bridge.js' || true`, { timeout: 3000, stdio: 'ignore' });
-    }
-  } catch {}
-}
-
-function stopExistingBridge(): void {
-  // 0. Kill ALL bridge processes (not just the one in state.json).
-  // Previous tests may have left orphaned bridge.js processes.
-  killAllBridgeProcesses();
-
-  // 1. Kill by saved PID (fast path)
+  // 1. Kill by saved PID (from state.json)
   const state = loadState();
-  let killed = false;
   if (state && isBridgeRunning(state.pid)) {
     console.log(`Stopping existing bridge (PID ${state.pid})...`);
     killProcess(state.pid);
-    killed = true;
   }
 
-  // 2. If port is still in use, try to kill any process using it
+  // 2. Kill any process listening on our port
   if (isPortInUse(BRIDGE_PORT)) {
-    console.log(`Port ${BRIDGE_PORT} still in use, forcing cleanup...`);
     try {
-      // Find and kill process using the port
       if (process.platform === 'win32') {
         const output = execSync(
           `netstat -ano | findstr :${BRIDGE_PORT} | findstr LISTENING`,
@@ -156,18 +124,23 @@ function stopExistingBridge(): void {
           if (match) {
             const pid = parseInt(match[1], 10);
             if (pid && pid !== process.pid) {
-              console.log(`Killing process ${pid} using port ${BRIDGE_PORT}`);
+              console.log(`Killing process ${pid} on port ${BRIDGE_PORT}`);
               killProcess(pid);
-              killed = true;
             }
           }
         }
+      } else {
+        execSync(`lsof -ti :${BRIDGE_PORT} | xargs kill -9 2>/dev/null || true`, { timeout: 3000, stdio: 'ignore' });
       }
     } catch {}
   }
+}
 
-  // 3. Wait for port to be released
-  if (killed) {
+function stopExistingBridge(): void {
+  killAllBridgeProcesses();
+
+  // Wait for port to be released
+  if (isPortInUse(BRIDGE_PORT)) {
     console.log('Waiting for port to be released...');
     const released = waitForPortRelease(BRIDGE_PORT, 5000);
     if (!released) {
@@ -445,7 +418,6 @@ async function startBridgeInNewTerminal(mode: 'cli' | 'vscode', sessionId?: stri
   const launcherPath = join(BRIDGE_DIR, 'cli-launcher.js');
   const launcherContent = `
 const { spawn } = require('child_process');
-const path = require('path');
 
 // Set CMD window title - this survives Claude Code TUI redraws
 process.stdout.write('\\x1b]2;[微信桥接] Claude Code — WeChat Bridge\\x07');
@@ -462,13 +434,18 @@ console.log('正在启动 Claude Code...');
 console.log('');
 
 const bridgePath = ${JSON.stringify(bridgePath)};
-const args = [bridgePath, '--mode', '${mode}'${sessionId && mode === 'vscode' ? `, '--session', '${sessionId}'` : ''}, '--cwd', process.cwd()];
+const args = [bridgePath, '--mode', '${mode}'${sessionId && mode === 'vscode' ? `, '--session', '${sessionId}'` : ''}, '--cwd', process.cwd(), '--launcher-pid', String(process.pid)];
 const child = spawn(process.execPath, args, { stdio: 'inherit' });
+
 child.on('exit', (code) => {
   console.log('\\n会话已结束，按 Ctrl+C 退出');
   process.exit(code || 0);
 });
-process.on('SIGINT', () => { child.kill(); process.exit(0); });
+
+// Handle CMD window close signals — just exit, bridge will detect our death via --launcher-pid
+process.on('SIGHUP', () => { process.exit(0); });
+process.on('SIGINT', () => { process.exit(0); });
+process.on('SIGTERM', () => { process.exit(0); });
 `;
   mkdirSync(BRIDGE_DIR, { recursive: true });
   writeFileSync(launcherPath, launcherContent, 'utf-8');

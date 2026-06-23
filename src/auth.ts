@@ -86,7 +86,7 @@ export async function startQrLogin(): Promise<{ qrcodeUrl: string; qrcodeId: str
  * Throws on expiry so the caller can regenerate.
  * Returns the full AccountData on success.
  */
-export async function waitForQrScan(qrcodeId: string): Promise<AccountData> {
+export async function waitForQrScan(qrcodeId: string): Promise<AccountData | 'RETRY'> {
   let lastStatus = '';
   let pollCount = 0;
   while (true) {
@@ -151,7 +151,8 @@ export async function waitForQrScan(qrcodeId: string): Promise<AccountData> {
       default: {
         const status = data.status ?? '';
         if (status.includes('not_support') || status.includes('forbid') || status.includes('reject')) {
-          throw new Error(`二维码扫描失败: ${data.retmsg || status}`);
+          // Return special signal instead of throwing — let caller decide to retry
+          return 'RETRY' as any;
         }
         // Unknown status — show it to the user
         if (status && status !== lastStatus) {
@@ -179,48 +180,62 @@ export async function waitForQrScan(qrcodeId: string): Promise<AccountData> {
  * the user can still scan the terminal ASCII QR code.
  */
 export async function interactiveLogin(): Promise<AccountData> {
-  let attempt = 0;
-  while (true) {
+  let browserOpened = false;
+  let retryCount = 0;
+  const MAX_RETRIES = 3;
+
+  while (retryCount < MAX_RETRIES) {
     const { qrcodeUrl, qrcodeId } = await startQrLogin();
-    attempt++;
 
-    console.log(`\n请用微信扫描二维码绑定 Bot${attempt > 1 ? '（已刷新）' : ''}：\n`);
+    console.log('\n请用微信扫描二维码绑定 Bot：\n');
 
-    // Show terminal ASCII QR code (encodes the URL for reference)
+    // Show terminal ASCII QR code (always up-to-date on each refresh)
     try {
       const qrcodeTerminal = await import('qrcode-terminal');
-      console.log('终端二维码（备用）：');
       qrcodeTerminal.default.generate(qrcodeUrl, { small: true });
       console.log();
     } catch {
       console.log(`二维码链接：${qrcodeUrl}\n`);
     }
 
-    // Open QR image in browser — this is the primary scanning method.
-    // The browser page renders the actual Bot binding QR image that WeChat can scan.
-    // IMPORTANT: Must quote the URL because cmd treats & as command separator,
-    // which truncates the URL at & (e.g. &bot_type=3 gets lost)
-    try {
-      const opener = process.platform === 'win32'
-        ? spawn('cmd', ['/c', 'start', '', `"${qrcodeUrl}"`], { detached: true, stdio: 'ignore' })
-        : spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [qrcodeUrl], { detached: true, stdio: 'ignore' });
-      opener.unref();
-      console.log(`📱 已在浏览器中打开二维码${attempt > 1 ? '（已刷新）' : ''}，请用微信扫描浏览器中的二维码`);
-    } catch {
-      console.log(`📱 请手动复制链接到浏览器打开：${qrcodeUrl}`);
+    // Only open browser on the FIRST attempt ever.
+    // On QR refresh, the browser tab still shows the old QR — user should
+    // scan the terminal ASCII QR code instead, or manually refresh the browser.
+    if (!browserOpened) {
+      browserOpened = true;
+      try {
+        const opener = process.platform === 'win32'
+          ? spawn('cmd', ['/c', 'start', '', `"${qrcodeUrl}"`], { detached: true, stdio: 'ignore' })
+          : spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [qrcodeUrl], { detached: true, stdio: 'ignore' });
+        opener.unref();
+        console.log('📱 已在浏览器中打开二维码，请用微信扫描');
+      } catch {
+        console.log(`📱 请复制链接到浏览器打开：${qrcodeUrl}`);
+      }
+    } else {
+      console.log('💡 二维码已刷新，请扫描上方终端二维码（或手动刷新浏览器页面）');
     }
 
-    console.log('\n等待扫码（二维码过期自动刷新，按 Ctrl+C 取消）...');
+    console.log('\n等待扫码（按 Ctrl+C 取消）...');
 
     try {
-      const account = await waitForQrScan(qrcodeId);
-      return account;
+      const result = await waitForQrScan(qrcodeId);
+      if (result === 'RETRY') {
+        // Scan failed (reject/forbid) — retry with fresh QR
+        retryCount++;
+        console.log(`\n⚠️ 扫码失败（${retryCount}/${MAX_RETRIES}），正在重新生成二维码...`);
+        continue;
+      }
+      return result as AccountData;
     } catch (e: any) {
       if (e.message?.includes('expired')) {
-        console.log('\n二维码已过期，正在重新生成...\n');
+        // QR expired — don't count as a failed scan, just regenerate
+        console.log('\n⏰ 二维码已过期，正在重新生成...\n');
         continue;
       }
       throw e;
     }
   }
+
+  throw new Error(`扫码重试已达上限（${MAX_RETRIES}次），请重新执行 /wechat`);
 }

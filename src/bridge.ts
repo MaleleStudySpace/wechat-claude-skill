@@ -39,20 +39,22 @@ function logError(msg: string): void {
 }
 
 // Parse CLI arguments
-function parseArgs(): { mode: 'cli' | 'vscode'; sessionId?: string; cwd: string } {
+function parseArgs(): { mode: 'cli' | 'vscode'; sessionId?: string; cwd: string; launcherPid?: number } {
   const args = process.argv.slice(2);
   let mode: 'cli' | 'vscode' = 'cli';
   let sessionId: string | undefined;
   let cwd = process.cwd();
+  let launcherPid: number | undefined;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case '--mode': mode = args[++i] as any; break;
       case '--session': sessionId = args[++i]; break;
       case '--cwd': cwd = args[++i]; break;
+      case '--launcher-pid': launcherPid = parseInt(args[++i], 10); break;
     }
   }
-  return { mode, sessionId, cwd };
+  return { mode, sessionId, cwd, launcherPid };
 }
 
 // Format message for WeChat display
@@ -73,8 +75,8 @@ function formatForClaude(msg: WeChatMessage): string {
 }
 
 async function main() {
-  const { mode, sessionId, cwd } = parseArgs();
-  log(`Starting in ${mode} mode, cwd=${cwd}, session=${sessionId || 'none'}`);
+  const { mode, sessionId, cwd, launcherPid } = parseArgs();
+  log(`Starting in ${mode} mode, cwd=${cwd}, session=${sessionId || 'none'}, launcherPid=${launcherPid || 'none'}`);
 
   // Load account data (from QR login)
   const account = loadAccount();
@@ -224,6 +226,20 @@ async function main() {
 
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
+
+  // Monitor launcher process: if the CMD window (cli-launcher.js) closes,
+  // bridge should exit too. This prevents orphaned bridge processes.
+  if (launcherPid) {
+    const watch = setInterval(() => {
+      try {
+        process.kill(launcherPid, 0);  // throws if process is dead
+      } catch {
+        log(`Launcher process ${launcherPid} is dead, shutting down`);
+        clearInterval(watch);
+        shutdown();
+      }
+    }, 3000);
+  }
 
   // Handle uncaught errors
   process.on('uncaughtException', (error) => {
