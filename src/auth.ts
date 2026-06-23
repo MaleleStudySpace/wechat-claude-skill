@@ -184,30 +184,33 @@ export async function interactiveLogin(): Promise<AccountData> {
     const { qrcodeUrl, qrcodeId } = await startQrLogin();
     attempt++;
 
-    // Always show terminal ASCII QR code as primary method
+    console.log(`\n请用微信扫描二维码绑定 Bot${attempt > 1 ? '（已刷新）' : ''}：\n`);
+
+    // Show terminal ASCII QR code (encodes the URL for reference)
     try {
       const qrcodeTerminal = await import('qrcode-terminal');
-      console.log(`\n请用微信扫描下方二维码${attempt > 1 ? '（已刷新）' : ''}：\n`);
+      console.log('终端二维码（备用）：');
       qrcodeTerminal.default.generate(qrcodeUrl, { small: true });
       console.log();
     } catch {
-      console.log(`\n请用微信扫描二维码：${qrcodeUrl}\n`);
+      console.log(`二维码链接：${qrcodeUrl}\n`);
     }
 
-    // Open QR image in browser so user can scan a larger image.
-    // Re-open on each refresh since the QR URL changes.
+    // Open QR image in browser — this is the primary scanning method.
+    // The browser page renders the actual Bot binding QR image that WeChat can scan.
+    // IMPORTANT: Must quote the URL because cmd treats & as command separator,
+    // which truncates the URL at & (e.g. &bot_type=3 gets lost)
     try {
       const opener = process.platform === 'win32'
-        ? spawn('cmd', ['/c', 'start', '', qrcodeUrl], { detached: true, stdio: 'ignore' })
+        ? spawn('cmd', ['/c', 'start', '', `"${qrcodeUrl}"`], { detached: true, stdio: 'ignore' })
         : spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [qrcodeUrl], { detached: true, stdio: 'ignore' });
       opener.unref();
-      console.log(`📱 已在浏览器中打开二维码${attempt > 1 ? '（已刷新）' : ''}`);
-      console.log('   如浏览器无法显示，请直接扫描上方终端二维码');
+      console.log(`📱 已在浏览器中打开二维码${attempt > 1 ? '（已刷新）' : ''}，请用微信扫描浏览器中的二维码`);
     } catch {
-      console.log(`📱 请复制链接到浏览器打开：${qrcodeUrl}`);
+      console.log(`📱 请手动复制链接到浏览器打开：${qrcodeUrl}`);
     }
 
-    console.log('等待扫码（二维码过期自动刷新，按 Ctrl+C 取消）...');
+    console.log('\n等待扫码（二维码过期自动刷新，按 Ctrl+C 取消）...');
 
     try {
       const account = await waitForQrScan(qrcodeId);
