@@ -18,16 +18,18 @@
 # 1. 安装（需要 Node.js 18+）
 npm install -g wechat-claude-skill
 
-# 2. 启动 Claude Code
+# 2. 打开终端，启动 Claude Code
 claude
 
 # 3. 在 Claude Code 里输入
 /wechat
 ```
 
-选择「CLI 终端」，扫码绑定，然后在微信里给 Bot 发条消息——搞定。
+选择「CLI 终端」，扫码绑定微信，然后在微信里给 Bot 发条消息——搞定。
 
-之后你发微信就是跟 Claude 聊天，Claude 的回复直接出现在微信里。
+之后你在微信发消息就是跟 Claude 聊天，Claude 的回复直接出现在微信里。
+
+> 💡 安装时 `postinstall` 会自动配置 Skill 和 Hook。如果自动配置失败（如 npx 临时缓存），可手动执行 `wechat-claude-skill install`。
 
 ## 使用方式
 
@@ -46,12 +48,14 @@ claude
 
 ### 方式二：VSCode + 微信
 
-在 VSCode 中使用 Claude Code，回复自动推送到微信（只能看，不能从微信回复）。
+在 VSCode 中使用 Claude Code，Claude 的回复自动推送到微信。
 
 1. 在 VSCode 的 Claude Code 中输入 `/wechat`
 2. 选择「VSCode」
-3. 扫码绑定，然后在微信中发一条消息激活
+3. 扫码绑定，然后在微信中给 Bot 发一条消息激活
 4. 之后 Claude 的回复自动出现在微信里
+
+> ⚠️ VSCode 模式是**单向推送**：Claude 回复会推送到微信，但你在微信发消息 Claude 不会收到（因为没有终端来注入消息）。
 
 ### 解绑
 
@@ -120,11 +124,12 @@ src/
 
 | 问题 | 说明 |
 |------|------|
-| 旧窗口需手动关闭 | CLI 模式弹出新窗口后，旧窗口需手动关闭（直接 kill 可能误杀其他实例） |
 | Hook 全局生效 | 所有 Claude Code 实例的回复都会推送到微信，无法区分来源 |
-| 仅支持单实例 | 同一时间只能运行一个 Bridge（CLI 或 VSCode） |
+| 仅支持单实例 | 同一时间只能运行一个 Bridge（CLI 或 VSCode），端口 3456 固定 |
 | 长消息截断 | 超过 4000 字符的回复会被截断 |
 | 会话过期 | Bot 长时间不活跃会过期，需重新扫码 |
+| VSCode bridge 残留 | 关掉 VSCode 后 bridge 仍在后台运行，需 `/unwechat` 清理 |
+| 微信仅支持文本 | 图片/文件消息只显示占位符 |
 
 ## 致谢
 
