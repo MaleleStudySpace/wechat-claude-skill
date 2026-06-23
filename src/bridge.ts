@@ -13,7 +13,7 @@
  */
 
 import express from 'express';
-import { writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, appendFileSync, mkdirSync, unlinkSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { loadAccount } from './auth.js';
@@ -171,16 +171,63 @@ async function main() {
 
   // Start WeChat message polling
   let consecutivePollErrors = 0;
-  let tokenInvalidNotified = false;
+  let autoUnbound = false;
   const MAX_CONSECUTIVE_ERRORS = 5;  // After 5 consecutive failures, assume token is invalid
+
+  // Auto-unbind: delete account.json + remove hook + cleanup state + shutdown
+  const autoUnbind = (reason: string) => {
+    if (autoUnbound) return;
+    autoUnbound = true;
+    log(`Auto-unbind triggered: ${reason}`);
+
+    // 1. Delete account.json (token is invalid, useless)
+    const accountPath = join(BRIDGE_DIR, 'account.json');
+    try { unlinkSync(accountPath); log('Deleted account.json'); } catch {}
+
+    // 2. Remove hook config from settings.json
+    try {
+      const settingsPath = join(homedir(), '.claude', 'settings.json');
+      if (existsSync(settingsPath)) {
+        const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+        if (settings.hooks) {
+          for (const eventName of Object.keys(settings.hooks)) {
+            const entries = settings.hooks[eventName];
+            if (!Array.isArray(entries)) continue;
+            settings.hooks[eventName] = entries.filter((entry: any) =>
+              !entry.hooks?.some((h: any) =>
+                (h.command && h.command.includes('hook-handler')) ||
+                (h.args && h.args.some((a: string) => a.includes('hook-handler')))
+              )
+            );
+            if (settings.hooks[eventName].length === 0) delete settings.hooks[eventName];
+          }
+          if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+          writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+          log('Removed hook-handler from settings.json');
+        }
+      }
+    } catch (e: any) { logError(`Failed to remove hook config: ${e.message}`); }
+
+    // 3. Cleanup state files
+    try { unlinkSync(join(BRIDGE_DIR, 'state.json')); } catch {}
+    try { unlinkSync(join(BRIDGE_DIR, 'bridge.pid')); } catch {}
+    try { unlinkSync(join(BRIDGE_DIR, 'pty.pid')); } catch {}
+
+    // 4. Show prompt to user
+    const msg = '\n\n⚠️ 微信绑定已失效，已自动解绑。请执行 /wechat 重新绑定。\n';
+    if (mode === 'cli') {
+      try { process.stdout.write(msg); } catch {}
+    }
+    log('⚠️ 微信绑定已失效，已自动解绑。请执行 /wechat 重新绑定。');
+
+    // 5. Shutdown
+    shutdown();
+  };
+
   const poller = startMessagePolling(
     config,
     (messages: WeChatMessage[]) => {
       consecutivePollErrors = 0;  // Reset on success
-      if (tokenInvalidNotified) {
-        log('Poll recovered — token is valid again');
-        tokenInvalidNotified = false;
-      }
       log(`Received ${messages.length} messages from polling`);
       for (const msg of messages) {
         log(`  msg: isSystem=${msg.isSystem} isBot=${msg.isBot} text=${msg.text?.slice(0, 50)}`);
@@ -203,29 +250,12 @@ async function main() {
     (error) => {
       consecutivePollErrors++;
       logError(`Poll error (${consecutivePollErrors}/${MAX_CONSECUTIVE_ERRORS}): ${error.message}`);
-      if (consecutivePollErrors >= MAX_CONSECUTIVE_ERRORS && !tokenInvalidNotified) {
-        tokenInvalidNotified = true;
-        const msg = '\n\n⚠️ 微信连接失败（连续 ' + MAX_CONSECUTIVE_ERRORS + ' 次错误）\n' +
-          '可能原因：同一微信在另一台电脑上进行了绑定，导致当前 token 失效。\n' +
-          '请在 Claude Code 中执行 /wechat 重新绑定微信。\n';
-        // Show in terminal (if CLI mode with PTY)
-        if (mode === 'cli') {
-          try { process.stdout.write(msg); } catch {}
-        }
-        logError('Token may be invalid — another device may have bound this WeChat. User should run /wechat to re-bind.');
+      if (consecutivePollErrors >= MAX_CONSECUTIVE_ERRORS) {
+        autoUnbind(`连续 ${MAX_CONSECUTIVE_ERRORS} 次轮询失败，token 可能已失效`);
       }
     },
     () => {
-      if (!tokenInvalidNotified) {
-        tokenInvalidNotified = true;
-        const msg = '\n\n⚠️ 微信会话已过期\n' +
-          '可能原因：同一微信在另一台电脑上进行了绑定。\n' +
-          '请在 Claude Code 中执行 /wechat 重新绑定微信。\n';
-        if (mode === 'cli') {
-          try { process.stdout.write(msg); } catch {}
-        }
-        logError('Session expired — another device may have bound this WeChat. User should run /wechat to re-bind.');
-      }
+      autoUnbind('微信会话已过期 (errcode=-14)');
     },
   );
 
