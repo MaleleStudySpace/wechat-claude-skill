@@ -87,6 +87,8 @@ export async function startQrLogin(): Promise<{ qrcodeUrl: string; qrcodeId: str
  * Returns the full AccountData on success.
  */
 export async function waitForQrScan(qrcodeId: string): Promise<AccountData> {
+  let lastStatus = '';
+  let pollCount = 0;
   while (true) {
     const url = `${QR_STATUS_URL}?qrcode=${encodeURIComponent(qrcodeId)}`;
 
@@ -111,9 +113,20 @@ export async function waitForQrScan(qrcodeId: string): Promise<AccountData> {
     const data = (await res.json()) as QrStatusResponse;
 
     switch (data.status) {
-      case 'wait':
-      case 'scaned':
-        break; // continue polling
+      case 'wait': {
+        if (lastStatus !== 'wait') {
+          console.log('⏳ 等待扫码...');
+          lastStatus = 'wait';
+        }
+        break;
+      }
+      case 'scaned': {
+        if (lastStatus !== 'scaned') {
+          console.log('📱 已扫描！请在手机上点击确认...');
+          lastStatus = 'scaned';
+        }
+        break;
+      }
 
       case 'confirmed': {
         if (!data.bot_token || !data.ilink_bot_id || !data.ilink_user_id) {
@@ -140,10 +153,16 @@ export async function waitForQrScan(qrcodeId: string): Promise<AccountData> {
         if (status.includes('not_support') || status.includes('forbid') || status.includes('reject')) {
           throw new Error(`二维码扫描失败: ${data.retmsg || status}`);
         }
+        // Unknown status — show it to the user
+        if (status && status !== lastStatus) {
+          console.log(`⚠️ 未知扫码状态: ${status} ${data.retmsg || ''}`);
+          lastStatus = status;
+        }
         break;
       }
     }
 
+    pollCount++;
     await sleep(POLL_INTERVAL_MS);
   }
 }
@@ -153,32 +172,42 @@ export async function waitForQrScan(qrcodeId: string): Promise<AccountData> {
  * Auto-regenerates QR when expired.
  * Auto-opens QR code image in browser for easy scanning.
  * Returns AccountData on success.
+ *
+ * IMPORTANT: The QR code URL (qrcode_img_content) is a link like
+ * https://liteapp.weixin.qq.com/q/... which shows a QR image in the browser.
+ * WeChat scans this image. If the browser fails to load (network error),
+ * the user can still scan the terminal ASCII QR code.
  */
 export async function interactiveLogin(): Promise<AccountData> {
+  let attempt = 0;
   while (true) {
     const { qrcodeUrl, qrcodeId } = await startQrLogin();
+    attempt++;
 
+    // Always show terminal ASCII QR code as primary method
     try {
       const qrcodeTerminal = await import('qrcode-terminal');
-      console.log('\n请用微信扫描下方二维码：\n');
+      console.log(`\n请用微信扫描下方二维码${attempt > 1 ? '（已刷新）' : ''}：\n`);
       qrcodeTerminal.default.generate(qrcodeUrl, { small: true });
       console.log();
     } catch {
       console.log(`\n请用微信扫描二维码：${qrcodeUrl}\n`);
     }
 
-    // Auto-open QR code image in browser (Windows: `start` is a cmd builtin)
+    // Open QR image in browser so user can scan a larger image.
+    // Re-open on each refresh since the QR URL changes.
     try {
       const opener = process.platform === 'win32'
         ? spawn('cmd', ['/c', 'start', '', qrcodeUrl], { detached: true, stdio: 'ignore' })
         : spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [qrcodeUrl], { detached: true, stdio: 'ignore' });
       opener.unref();
-      console.log('📱 已自动在浏览器中打开二维码图片');
+      console.log(`📱 已在浏览器中打开二维码${attempt > 1 ? '（已刷新）' : ''}`);
+      console.log('   如浏览器无法显示，请直接扫描上方终端二维码');
     } catch {
-      console.log(`📱 或者点击链接打开：${qrcodeUrl}`);
+      console.log(`📱 请复制链接到浏览器打开：${qrcodeUrl}`);
     }
 
-    console.log('等待扫码（二维码过期自动刷新）...');
+    console.log('等待扫码（二维码过期自动刷新，按 Ctrl+C 取消）...');
 
     try {
       const account = await waitForQrScan(qrcodeId);

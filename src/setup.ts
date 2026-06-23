@@ -186,14 +186,47 @@ function stopExistingBridge(): void {
 async function ensureAccount(): Promise<AccountData> {
   let account = loadAccount();
   if (account) {
-    console.log(`Using existing account: ${account.accountId}`);
-    return account;
+    // Verify the saved account still works by testing sendMessage
+    console.log(`发现已保存的账号: ${account.accountId}`);
+    console.log('正在验证账号是否有效...');
+    const valid = await verifyAccount(account);
+    if (valid) {
+      console.log('✅ 账号验证通过');
+      return account;
+    }
+    console.log('⚠️  已保存的账号已失效，需要重新扫码登录');
+    // Delete the invalid account file
+    const accountPath = join(BRIDGE_DIR, 'account.json');
+    try { unlinkSync(accountPath); } catch {}
   }
 
-  console.log('No account found. Starting QR code login...\n');
+  console.log('请扫描二维码登录微信 Bot...\n');
   account = await interactiveLogin();
-  console.log(`\nLogin successful! Account: ${account.accountId}`);
+  console.log(`\n✅ 登录成功！账号: ${account.accountId}`);
   return account;
+}
+
+/**
+ * Verify a saved account by making a test API call.
+ * Returns true if the account token is still valid.
+ */
+async function verifyAccount(account: AccountData): Promise<boolean> {
+  try {
+    const res = await fetch(`${account.baseUrl}/ilink/bot/get_bot_qrcode?bot_type=3`, {
+      headers: {
+        'Authorization': `Bearer ${account.botToken}`,
+        'AuthorizationType': 'ilink_bot_token',
+      },
+    });
+    if (!res.ok) return false;
+    const data = await res.json() as any;
+    // ret=0 means the token is valid; other values mean expired/invalid
+    return data.ret === 0;
+  } catch {
+    // Network error — can't verify, assume valid (offline scenario)
+    console.log('⚠️  无法连接服务器验证账号，将尝试使用已保存的账号');
+    return true;
+  }
 }
 
 function getClaudeSettingsPath(): string {
@@ -373,13 +406,23 @@ async function setupCli(): Promise<void> {
 
   // Stop any existing bridge first
   stopExistingBridge();
-  await ensureAccount();  // Auto-login if needed
+
+  // QR login — ensureAccount will verify existing account or prompt for scan
+  // If user presses Ctrl+C during scan, the process exits cleanly
+  let account: AccountData;
+  try {
+    account = await ensureAccount();
+  } catch (e: any) {
+    console.error(`\n❌ 登录失败: ${e.message}`);
+    console.error('   请重新运行 /wechat 重试');
+    process.exit(1);
+  }
   writeHookConfig();
 
   // Start bridge in a NEW terminal window
   // The PTY inside will run `claude --continue` to resume the most recent conversation
   console.log('📱 正在打开新终端窗口...');
-  await startBridgeInNewTerminal('cli');
+  startBridgeInNewTerminal('cli');
 
   console.log('');
   console.log('✅ 微信双向绑定已启动！');
