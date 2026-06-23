@@ -101,16 +101,30 @@ async function waitForPortRelease(port: number, maxWaitMs = 5000): Promise<boole
 /**
  * Kill ALL bridge processes.
  * Uses port detection + saved PID — no wmic (unreliable, dangerous, deprecated on new Windows).
+ * Also kills the PTY (Claude Code) process spawned by the bridge.
  */
 function killAllBridgeProcesses(): void {
   // 1. Kill by saved PID (from state.json)
   const state = loadState();
   if (state && isBridgeRunning(state.pid)) {
     console.log(`Stopping existing bridge (PID ${state.pid})...`);
-    killProcess(state.pid);
+    killProcess(state.pid);  // taskkill /T kills the process tree
   }
 
-  // 2. Kill any process listening on our port
+  // 2. Kill PTY process saved by bridge (the claude.cmd instance)
+  const ptyPidPath = join(BRIDGE_DIR, 'pty.pid');
+  if (existsSync(ptyPidPath)) {
+    try {
+      const ptyPid = parseInt(readFileSync(ptyPidPath, 'utf-8').trim(), 10);
+      if (ptyPid && isBridgeRunning(ptyPid)) {
+        console.log(`Stopping PTY process (PID ${ptyPid})...`);
+        killProcess(ptyPid);
+      }
+      unlinkSync(ptyPidPath);
+    } catch {}
+  }
+
+  // 3. Kill any process listening on our port
   if (isPortInUse(BRIDGE_PORT)) {
     try {
       if (process.platform === 'win32') {
@@ -134,6 +148,10 @@ function killAllBridgeProcesses(): void {
       }
     } catch {}
   }
+
+  // 4. Clean up state files
+  try { unlinkSync(BRIDGE_PID_FILE); } catch {}
+  try { unlinkSync(STATE_FILE); } catch {}
 }
 
 function stopExistingBridge(): void {
@@ -147,10 +165,6 @@ function stopExistingBridge(): void {
       console.warn('Warning: Port not released, will retry anyway');
     }
   }
-
-  // 4. Clean up state files
-  try { unlinkSync(BRIDGE_PID_FILE); } catch {}
-  try { unlinkSync(STATE_FILE); } catch {}
 }
 
 /**
