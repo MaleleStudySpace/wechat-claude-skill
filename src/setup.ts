@@ -267,6 +267,18 @@ function writeHookConfig(): void {
     }],
   });
 
+  // Also add to Notification hook — push Claude's questions to WeChat
+  settings.hooks.Notification = settings.hooks.Notification || [];
+  settings.hooks.Notification.push({
+    hooks: [{
+      type: 'command',
+      command: 'node',
+      args: [HOOK_HANDLER_PATH],
+      async: true,
+      timeout: 60,
+    }],
+  });
+
   const dir = join(settingsPath, '..');
   mkdirSync(dir, { recursive: true });
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
