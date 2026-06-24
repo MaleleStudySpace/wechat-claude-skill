@@ -21,6 +21,7 @@ import { BRIDGE_DIR, DEFAULTS } from './config.js';
 import { startMessagePolling, sendMessage, type WeChatMessage } from './wechat.js';
 import { MessageQueue } from './queue.js';
 import { PTYServer } from './pty-server.js';
+import { showDisconnectToast } from './notify.js';
 
 const LOG_FILE = join(BRIDGE_DIR, 'bridge.log');
 
@@ -97,6 +98,35 @@ async function main() {
   log(`Account: ${account.accountId}, toUserId: ${config.toUserId}`);
   const queue = new MessageQueue();
   let activated = false;  // Track if any user message has been received
+  let consecutiveSendErrors = 0;  // Consecutive sendMessage failures with errcode=-14
+  let halfDisconnected = false;   // Whether we've already shown the disconnect toast
+  const HALF_DISCONNECT_THRESHOLD = 3;  // 3 consecutive -14 errors = half-disconnect
+
+  /** Check sendMessage result for half-disconnect pattern (errcode=-14).
+   *  After 3 consecutive -14 errors, show a toast notification once.
+   *  Resets on any successful send. */
+  const checkHalfDisconnect = (result: { success: boolean; error?: string }) => {
+    if (result.success) {
+      if (consecutiveSendErrors > 0 || halfDisconnected) {
+        log('sendMessage recovered, resetting half-disconnect state');
+      }
+      consecutiveSendErrors = 0;
+      halfDisconnected = false;
+      return;
+    }
+    // Only count -14 / session_expired as half-disconnect signal
+    const isSessionExpired = result.error?.includes('session_expired') ||
+      result.error?.includes('errcode=-14');
+    if (isSessionExpired) {
+      consecutiveSendErrors++;
+      log(`Half-disconnect check: consecutiveSendErrors=${consecutiveSendErrors}/${HALF_DISCONNECT_THRESHOLD}`);
+      if (consecutiveSendErrors >= HALF_DISCONNECT_THRESHOLD && !halfDisconnected) {
+        halfDisconnected = true;
+        log('Half-disconnect detected: showing toast notification');
+        showDisconnectToast();
+      }
+    }
+  };
 
   // Create Express app
   const app = express();
@@ -125,6 +155,7 @@ async function main() {
       if (config.toUserId) {
         const result = await sendMessage(config, config.toUserId, '💬 Claude 已回复');
         log(`Notification result: ${JSON.stringify(result)}`);
+        checkHalfDisconnect(result);
       }
       res.json({ mode, ok: true });
       return;
@@ -139,8 +170,10 @@ async function main() {
       log(`sendMessage result: ${JSON.stringify(result)}`);
       if (result.success) {
         log(`Sent to WeChat: ${formatted.slice(0, 80)}...`);
+        checkHalfDisconnect(result);
       } else {
         logError(`WeChat send failed: ${result.error}`);
+        checkHalfDisconnect(result);
       }
     }
 
