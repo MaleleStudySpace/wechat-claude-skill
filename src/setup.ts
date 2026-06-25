@@ -477,7 +477,15 @@ process.on('SIGTERM', () => { process.exit(0); });
   writeFileSync(launcherPath, launcherContent, 'utf-8');
 
   // Open new CMD window running the launcher
-  spawn('cmd', ['/c', 'start', 'cmd', '/K', process.execPath, launcherPath], {
+  // Strategy: use `start` command with a title, then `cmd /K "node launcher.js"`
+  // The inner quotes ensure paths with spaces (e.g. "Program Files") are handled.
+  // We must NOT pass process.execPath directly to cmd /K because:
+  //   1. cmd.exe's /K flag doesn't handle quoted paths well
+  //   2. If .js file association is wrong, Windows opens the file in an editor
+  // Instead, we use a quoted command string that explicitly calls node.
+  const nodeExe = process.execPath;  // e.g. C:\Program Files\nodejs\node.exe
+  const startCmd = `"${nodeExe}" "${launcherPath}"`;
+  spawn('cmd', ['/c', 'start', '"[微信桥接] Claude Code"', 'cmd', '/K', startCmd], {
     detached: true,
     stdio: 'ignore',
     shell: false,
