@@ -146,15 +146,17 @@ async function main() {
   // Stop hook endpoint - receives Claude's response
   app.post('/hooks/stop', async (req, res) => {
     const { message, session_id } = req.body;
-    log(`Stop hook: session=${session_id}, msgLen=${message?.length || 0}`);
+    log(`[HOOK] Stop event: session=${session_id}, msgLen=${message?.length || 0}, mode=${mode}, toUserId=${config.toUserId || 'none'}`);
 
     // VSCode mode: message is just "stop" notification, send brief notification
     if (message === 'stop' && mode === 'vscode') {
-      log('VSCode mode: sending stop notification');
+      log('[HOOK] VSCode mode: sending stop notification');
       if (config.toUserId) {
         const result = await sendMessage(config, config.toUserId, '💬 Claude 已回复');
-        log(`Notification result: ${JSON.stringify(result)}`);
+        log(`[HOOK] Notification result: success=${result.success}, error=${result.error || 'none'}`);
         checkHalfDisconnect(result);
+      } else {
+        log('[HOOK] No toUserId, skip sending');
       }
       res.json({ mode, ok: true });
       return;
@@ -163,13 +165,13 @@ async function main() {
     // CLI mode or full message: send to WeChat (split if too long)
     if (message && config.toUserId) {
       const chunks = splitMessage(message);
-      log(`Message split into ${chunks.length} chunks (original length: ${message.length})`);
+      log(`[HOOK] Message split into ${chunks.length} chunks (original length: ${message.length})`);
 
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
-        log(`Sending chunk ${i + 1}/${chunks.length}: ${chunk.slice(0, 80)}...`);
+        log(`[HOOK] Sending chunk ${i + 1}/${chunks.length} (${chunk.length} chars)`);
         const result = await sendMessage(config, config.toUserId, chunk);
-        log(`Chunk ${i + 1}/${chunks.length} result: ${JSON.stringify(result)}`);
+        log(`[HOOK] Chunk ${i + 1}/${chunks.length} result: success=${result.success}, error=${result.error || 'none'}, msgId=${result.msgId || 'none'}`);
 
         if (result.success) {
           log(`Sent chunk ${i + 1}/${chunks.length} to WeChat`);

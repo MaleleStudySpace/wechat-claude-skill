@@ -455,6 +455,8 @@ async function setupCli(): Promise<void> {
   console.log('   📱 微信发消息 → 自动注入到 Claude');
   console.log('   💬 Claude 回复 → 自动推送到微信');
   console.log('');
+  console.log('⚠️  重要：请在微信中给 Bot 发送一条消息（任意内容）以激活会话！');
+  console.log('');
   console.log('💡 请手动关闭此窗口，然后切换到新窗口继续对话');
 }
 
@@ -588,7 +590,7 @@ wechat-claude-skill cli
 \`\`\`
 
 The command will prompt the user to choose CLI or VSCode mode.
-After it finishes, tell the user: "微信绑定流程已完成，请按终端提示操作。"
+After it starts, tell the user: "微信绑定流程正在进行中，请按终端提示操作。"
 
 All messages to the user must be in Chinese.
 
