@@ -1,34 +1,15 @@
 /**
- * Stop hook handler.
+ * Hook handler for multiple Claude Code hook events.
  *
- * Triggered by Claude Code's Stop event (fires when Claude finishes responding).
- * Reads `last_assistant_message` from stdin and sends it to WeChat.
+ * Handles:
+ * - Stop: Claude finished responding (last_assistant_message)
+ * - Notification: system notifications
+ * - StopFailure: API error occurred (error message)
+ * - PostToolUseFailure: tool execution failed (tool name + error)
+ * - PermissionRequest: permission dialog needs user action (permission description)
+ * - Elicitation: MCP asking user for input (question)
  *
- * Works for both VSCode and CLI modes:
- * - VSCode: one-way notification (Claude → WeChat)
- * - CLI: hook-handler detects CLI mode and exits early (bridge handles messages via PTY)
- *
- * Exit 0: normal exit, Claude stays stopped (ready for next user input)
- *
- * ## iLink sendMessage 关键结论 (2026-06-20 验证)
- *
- * 1. 新扫码绑定的 Bot，用户必须先发一条消息给 Bot，sendMessage 才能成功投递。
- *    在此之前 sendMessage 返回 ret:-2，微信收不到消息。
- *
- * 2. context_token 无关紧要 — 不传、传空字符串、传编造的值，都能发送成功。
- *    只要用户先发过消息激活了 Bot，sendMessage 就能工作。
- *
- * 3. getUpdates 预热不能替代"用户先发消息" — 仅调用 getUpdates 无法激活 Bot。
- *
- * 4. 微信二维码只有约 1 分钟有效期，过期需重新生成。
- *
- * 5. curl 发送中文会乱码（Windows 终端编码问题），Node.js fetch 默认 UTF-8 正常。
- *
- * ## hook-handler 与 bridge 的关系
- *
- * - VSCode 模式：hook-handler 直接发送消息到微信（bridge 仅做后台轮询）
- * - CLI 模式：bridge 通过 PTY 输出捕获 Claude 回复并发送到微信，
- *   hook-handler 检测到 CLI 模式后直接退出，避免同一条回复被发送两次。
+ * Exit 0: normal exit
  */
 
 import { appendFileSync } from 'node:fs';
@@ -41,7 +22,6 @@ import { splitMessage } from './split-message.js';
 import type { BridgeConfig } from './config.js';
 
 const LOG_FILE = join(homedir(), '.wechat-claude-skill', 'hook-handler.log');
-const BRIDGE_DIR = join(homedir(), '.wechat-claude-skill');
 
 function debugLog(msg: string): void {
   const now = new Date();
@@ -58,31 +38,67 @@ async function readStdin(): Promise<string> {
   return lines.join('\n');
 }
 
+/** Extract message content from different hook events */
+function extractMessageFromHook(hookInput: any): string | undefined {
+  // Stop: Claude finished responding
+  if (hookInput.last_assistant_message) {
+    return hookInput.last_assistant_message;
+  }
+
+  // StopFailure: API error occurred
+  if (hookInput.error) {
+    return `⚠️ Claude 发生错误:\n${hookInput.error}`;
+  }
+
+  // PostToolUseFailure: tool execution failed
+  if (hookInput.tool_name && hookInput.tool_error) {
+    return `⚠️ 工具执行失败:\n工具: ${hookInput.tool_name}\n错误: ${hookInput.tool_error}`;
+  }
+
+  // PermissionRequest: permission dialog
+  if (hookInput.permission_type || hookInput.permission_description) {
+    return `🔐 需要授权:\n${hookInput.permission_type || '权限请求'}\n${hookInput.permission_description || ''}`;
+  }
+
+  // Elicitation: MCP asking user for input
+  if (hookInput.elicitation_question || hookInput.message) {
+    return `❓ ${hookInput.elicitation_question || hookInput.message}`;
+  }
+
+  // Notification: system notification
+  if (hookInput.message || hookInput.notification) {
+    return hookInput.message || hookInput.notification;
+  }
+
+  // Fallback: try to stringify the whole input
+  const str = JSON.stringify(hookInput);
+  return str.length < 100 ? str : undefined;
+}
+
 async function main(): Promise<void> {
-  // Log immediately — proves the hook was triggered
   debugLog('=== Hook triggered ===');
 
-  // CLI mode also uses this hook to send Claude's clean last_assistant_message.
-  // PTY output contains TUI redraws/spinners/ANSI escapes, so bridge does NOT
-  // forward raw PTY output to WeChat. Do not skip when CLI bridge is active.
-
-  // Read hook input from stdin
   const inputStr = await readStdin();
   debugLog(`stdin length: ${inputStr.length}`);
 
   let hookInput: any = {};
   try { hookInput = JSON.parse(inputStr); } catch {
-    debugLog('Failed to parse stdin as JSON, continuing');
-  }
-
-  // Use last_assistant_message from hook input (provided by Claude Code)
-  const message: string | undefined = hookInput.last_assistant_message;
-  if (!message || !message.trim()) {
-    debugLog('No assistant message in hook input, exiting');
+    debugLog('Failed to parse stdin as JSON, exiting');
     process.exit(0);
   }
 
-  debugLog(`Message length: ${message.length}`);
+  // Determine which hook triggered this
+  const hookType = hookInput.hook_input_type || hookInput.event_name || 'unknown';
+  debugLog(`Hook type: ${hookType}`);
+
+  // Extract message based on hook type
+  const message = extractMessageFromHook(hookInput);
+  if (!message || !message.trim()) {
+    debugLog(`No message to send for hook type: ${hookType}, input: ${inputStr.slice(0, 200)}`);
+    process.exit(0);
+  }
+
+  debugLog(`Extracted message (${message.length} chars): ${message.slice(0, 80)}...`);
 
   // Load account
   const account = loadAccount();
@@ -100,20 +116,15 @@ async function main(): Promise<void> {
     pollInterval: 3000,
   };
 
-  // Split long messages into chunks (preserves markdown formatting)
+  // Split long messages into chunks
   const chunks = splitMessage(message);
-  debugLog(`Message split into ${chunks.length} chunks (original length: ${message.length})`);
+  debugLog(`Message split into ${chunks.length} chunks`);
 
-  // Send each chunk to WeChat — context_token is NOT required (see file header comment #2).
+  // Send each chunk
   for (let i = 0; i < chunks.length; i++) {
     debugLog(`Sending chunk ${i + 1}/${chunks.length}...`);
     const result = await sendMessage(config, account.userId, chunks[i]);
-
-    if (result.success) {
-      debugLog(`Chunk ${i + 1}/${chunks.length} sent successfully (msgId: ${result.msgId || 'unknown'})`);
-    } else {
-      debugLog(`Chunk ${i + 1}/${chunks.length} send failed: ${result.error}`);
-    }
+    debugLog(`Chunk ${i + 1} result: ${result.success ? 'OK' : 'FAIL: ' + result.error}`);
   }
 
   process.exit(0);
