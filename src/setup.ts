@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync, rmdirSy
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn, execSync } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { loadAccount, interactiveLogin, type AccountData } from './auth.js';
 import { BRIDGE_DIR } from './config.js';
 
@@ -395,8 +396,37 @@ async function waitForActivation(timeoutMs = 60_000): Promise<boolean> {
   return false;
 }
 
+/** Prompt user to choose CLI or VSCode mode via terminal input. */
+function promptModeSelection(): Promise<string> {
+  return new Promise((resolve) => {
+    console.log('');
+    console.log('请选择使用模式：');
+    console.log('  1. CLI 终端（双向通信：可从微信回复）');
+    console.log('  2. VSCode（单向通知：仅推送 Claude 回复）');
+    console.log('');
+
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    rl.question('请输入 1 或 2（默认 1）: ', (answer) => {
+      rl.close();
+      const trimmed = answer.trim();
+      resolve(trimmed === '2' ? '2' : '1');
+    });
+  });
+}
+
 // --- CLI mode ---
 async function setupCli(): Promise<void> {
+  // Ask user to choose mode (this replaces SKILL.md asking)
+  const choice = await promptModeSelection();
+
+  if (choice === '2') {
+    // User chose VSCode mode - run that instead
+    console.log('选择 VSCode 模式...\n');
+    await setupVscode();
+    return;
+  }
+
+  // CLI mode (choice === '1' or default)
   console.log('Starting WeChat binding (CLI mode)...\n');
 
   // Stop any existing bridge first
@@ -551,38 +581,20 @@ description: Sync Claude Code conversations to WeChat. Use when user runs /wecha
 
 # WeChat Integration for Claude Code
 
-When the user runs \`/wechat\`, do the following:
+When the user runs \`/wechat\`, run this command immediately:
 
-1. Ask the user to select their environment:
-   - "1. CLI 终端（双向通信：可从微信回复）"
-   - "2. VSCode（单向通知：仅推送 Claude 回复）"
+\`\`\`bash
+wechat-claude-skill cli
+\`\`\`
 
-2. Based on their choice, run the appropriate command **immediately without asking for confirmation**:
+The command will prompt the user to choose CLI or VSCode mode.
+After it finishes, tell the user: "微信绑定流程已完成，请按终端提示操作。"
 
-   **For CLI terminal:**
-   \`\`\`bash
-   wechat-claude-skill cli
-   \`\`\`
-
-   **For VSCode:**
-   \`\`\`bash
-   wechat-claude-skill vscode
-   \`\`\`
-
-3. After running the command:
-   - For CLI: Tell the user in Chinese:
-     "✅ 微信双向绑定已启动！已自动打开新终端窗口。
-     请手动关闭此窗口，然后切换到新窗口继续对话。
-     在新窗口中你可以和 Claude 对话，也可以在微信中发消息自动注入。"
-   - For VSCode: Tell the user in Chinese:
-     "✅ 微信通知已绑定成功！请立即在微信中给你刚绑定的 Bot 发一条消息（任意内容），这是激活 Bot 的必要步骤。之后 Claude 的回复就会自动推送到微信了。"
-   - **IMPORTANT**: Always remind the user to send a message to the Bot first.
-
-**IMPORTANT**: All user-facing messages must be in Chinese (中文). Never show English prompts or approval requests.
+All messages to the user must be in Chinese.
 
 ## Unbind
 
-Run \`/unwechat\` or \`wechat-claude-skill unbind\`
+When the user runs \`/unwechat\`, run \`wechat-claude-skill unbind\`.
 `;
 
   mkdirSync(GLOBAL_SKILL_DIR, { recursive: true });
